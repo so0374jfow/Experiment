@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MANIFOLD — Quaternion Sound Synthesis v5</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#000;overflow:hidden;font-family:'Courier New',monospace;color:#fff}
+canvas{display:block}
+#overlay{position:fixed;top:0;left:0;width:100%;height:100%;display:flex;align-items:center;justify-content:center;z-index:10;background:#000;cursor:pointer;transition:opacity 3s}
+#overlay.hidden{opacity:0;pointer-events:none}
+#overlay-text{text-align:center;letter-spacing:0.3em}
+#overlay-text h1{font-size:14px;font-weight:300;margin-bottom:8px;color:#68a}
+#overlay-text p{font-size:10px;font-weight:300;color:#234;letter-spacing:0.5em}
+#info{position:fixed;bottom:12px;left:12px;font-size:9px;color:#1a1a2a;letter-spacing:0.2em;z-index:5;opacity:0;transition:opacity 5s}
+#info.visible{opacity:1}
+#qdata{position:fixed;top:12px;right:12px;font-size:8px;color:#151525;letter-spacing:0.1em;z-index:5;text-align:right;opacity:0;transition:opacity 5s;line-height:1.6}
+#qdata.visible{opacity:1}
+</style>
+</head>
+<body>
+<div id="overlay">
+  <div id="overlay-text">
+    <h1>manifold</h1>
+    <p>click to begin</p>
+  </div>
+</div>
+<div id="info">MANIFOLD — continuous quaternion drone synthesis v5</div>
+<div id="qdata"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function() {
+  'use strict';
+
+  let audioCtx, masterGain, analyser, analyserData;
+  let scene, camera, renderer;
+  let started = false;
+  let time = 0;
+
+  // Particle system
+  const NUM_PARTICLES = 3000;
+  let particleSystem, particlePositions, particleVelocities, particleColors;
+
+  // Quaternion walkers on S³
+  const NUM_WALKERS = 4;
+  const walkers = [];
+
+  // Audio voices
+  const voices = [];
+
+  // ─── AUDIO ───
+  function initAudio() {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    masterGain = audioCtx.createGain();
+    masterGain.gain.value = 0;
+
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 512;
+    analyserData = new Uint8Array(analyser.frequencyBinCount);
+
+    // Feedback delay network for reverb-like wash
+    const delays = [];
+    const feedbackGains = [];
+    const delayTimes = [0.37, 0.53, 0.71, 0.97]; // prime-ish ratios
+
+    const wetGain = audioCtx.createGain();
+    wetGain.gain.value = 0.3;
+
+    for (let i = 0; i < 4; i++) {
+      const delay = audioCtx.createDelay(2);
+      delay.delayTime.value = delayTimes[i];
+      const fb = audioCtx.createGain();
+      fb.gain.value = 0.4;
+      const filter = audioCtx.createBiquadFilter();
+      filter.type = 'lowpass';
+      filter.frequency.value = 1500 - i * 200;
+
+      masterGain.connect(delay);
+      delay.connect(fb);
+      fb.connect(filter);
+      filter.connect(delay); // feedback
+      delay.connect(wetGain);
+
+      delays.push(delay);
+      feedbackGains.push(fb);
+    }
+
+    wetGain.connect(analyser);
+    masterGain.connect(analyser);
+    analyser.connect(audioCtx.destination);
+
+    // Create 4 drone voices
+    const baseFreqs = [55, 82.5, 110, 165]; // A1, E2, A2, E3
+
+    for (let i = 0; i < NUM_WALKERS; i++) {
+      // Main oscillator — sawtooth through heavy filter
+      const osc = audioCtx.createOscillator();
+      osc.type = i < 2 ? 'sawtooth' : 'triangle';
+      osc.frequency.value = baseFreqs[i];
+
+      const filter = audioCtx.createBiquadFilter();
+      filter.type = 'lowpass';
+      filter.frequency.value = 400;
+      filter.Q.value = 2;
+
+      const gain = audioCtx.createGain();
+      gain.gain.value = 0;
+
+      // LFO for amplitude modulation (breath-like)
+      const lfo = audioCtx.createOscillator();
+      lfo.type = 'sine';
+      lfo.frequency.value = 0.05 + i * 0.04; // Very slow: 0.05–0.17 Hz
+      const lfoGain = audioCtx.createGain();
+      lfoGain.gain.value = 0.015;
+      lfo.connect(lfoGain);
+      lfoGain.connect(gain.gain);
+      lfo.start();
+
+      osc.connect(filter);
+      filter.connect(gain);
+      gain.connect(masterGain);
+      osc.start();
+
+      // Quaternion walker
+      const walker = {
+        current: new THREE.Quaternion().setFromAxisAngle(
+          new THREE.Vector3(Math.random(), Math.random(), Math.random()).normalize(),
+          Math.random() * Math.PI * 2
+        ),
+        target: new THREE.Quaternion(),
+        speed: 0.0008 + i * 0.0003,
+        changeTimer: 0,
+        changeInterval: 30 + i * 20 // 30–90 second arcs
+      };
+      randomQuat(walker.target);
+      walkers.push(walker);
+
+      voices.push({ osc, filter, gain, lfo, lfoGain, baseFreq: baseFreqs[i] });
+    }
+
+    // Fade in very slowly
+    masterGain.gain.linearRampToValueAtTime(0.18, audioCtx.currentTime + 8);
+  }
+
+  function randomQuat(q) {
+    const axis = new THREE.Vector3(
+      Math.random() * 2 - 1,
+      Math.random() * 2 - 1,
+      Math.random() * 2 - 1
+    ).normalize();
+    q.setFromAxisAngle(axis, Math.random() * Math.PI * 2);
+  }
+
+  // ─── SCENE ───
+  function initScene() {
+    scene = new THREE.Scene();
+    scene.fog = new THREE.FogExp2(0x020208, 0.06);
+
+    camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 100);
+    camera.position.set(0, 0, 8);
+
+    renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setClearColor(0x020208);
+    document.body.appendChild(renderer.domElement);
+
+    // Particle system
+    const geometry = new THREE.BufferGeometry();
+    particlePositions = new Float32Array(NUM_PARTICLES * 3);
+    particleVelocities = [];
+    particleColors = new Float32Array(NUM_PARTICLES * 3);
+
+    for (let i = 0; i < NUM_PARTICLES; i++) {
+      // Random positions in a sphere
+      const theta = Math.random() * Math.PI * 2;
+      const phi = Math.acos(Math.random() * 2 - 1);
+      const r = Math.random() * 8 + 2;
+
+      particlePositions[i * 3] = r * Math.sin(phi) * Math.cos(theta);
+      particlePositions[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta);
+      particlePositions[i * 3 + 2] = r * Math.cos(phi);
+
+      particleVelocities.push(new THREE.Vector3(
+        (Math.random() - 0.5) * 0.01,
+        (Math.random() - 0.5) * 0.01,
+        (Math.random() - 0.5) * 0.01
+      ));
+
+      // Deep blue/violet palette
+      particleColors[i * 3] = 0.1 + Math.random() * 0.15;     // R
+      particleColors[i * 3 + 1] = 0.1 + Math.random() * 0.15; // G
+      particleColors[i * 3 + 2] = 0.3 + Math.random() * 0.4;  // B
+    }
+
+    geometry.setAttribute('position', new THREE.BufferAttribute(particlePositions, 3));
+    geometry.setAttribute('color', new THREE.BufferAttribute(particleColors, 3));
+
+    const material = new THREE.PointsMaterial({
+      size: 0.04,
+      transparent: true,
+      opacity: 0.6,
+      vertexColors: true,
+      sizeAttenuation: true,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false
+    });
+
+    particleSystem = new THREE.Points(geometry, material);
+    scene.add(particleSystem);
+
+    window.addEventListener('resize', onResize);
+  }
+
+  function onResize() {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  }
+
+  // ─── QUATERNION WALKER UPDATE ───
+  function updateWalkers(dt) {
+    for (let i = 0; i < NUM_WALKERS; i++) {
+      const w = walkers[i];
+      w.changeTimer += dt;
+
+      if (w.changeTimer > w.changeInterval) {
+        w.changeTimer = 0;
+        randomQuat(w.target);
+      }
+
+      // Ultra-slow SLERP
+      w.current.slerp(w.target, w.speed);
+    }
+  }
+
+  // Stereographic projection: S³ → R³
+  // Maps a unit quaternion to a 3D point
+  function stereographicProject(q) {
+    const denom = 1 - q.w + 0.001; // avoid division by zero
+    return new THREE.Vector3(
+      q.x / denom,
+      q.y / denom,
+      q.z / denom
+    );
+  }
+
+  // ─── AUDIO UPDATE ───
+  function updateAudio(dt) {
+    const t = audioCtx.currentTime;
+
+    for (let i = 0; i < NUM_WALKERS; i++) {
+      const w = walkers[i];
+      const v = voices[i];
+      const q = w.current;
+
+      // Map walker position to frequency via stereographic projection
+      const proj = stereographicProject(q);
+      const projMag = proj.length();
+
+      // Frequency: base frequency modulated by projection magnitude
+      // Closer to pole (small projMag) → closer to base
+      // Further from pole (large projMag) → higher harmonics
+      const freqMult = 1 + Math.min(projMag, 3) * 0.15;
+      const targetFreq = v.baseFreq * freqMult;
+      v.osc.frequency.exponentialRampToValueAtTime(Math.max(targetFreq, 20), t + 1);
+
+      // Filter cutoff from quaternion angle
+      const angle = q.angleTo(new THREE.Quaternion(0, 0, 0, 1));
+      const cutoff = 200 + (angle / Math.PI) * 1200;
+      v.filter.frequency.exponentialRampToValueAtTime(Math.max(cutoff, 50), t + 0.5);
+
+      // Gain: slow envelope, louder in middle ranges
+      const gainVal = 0.02 + Math.sin(angle) * 0.02;
+      v.gain.gain.linearRampToValueAtTime(gainVal, t + 2);
+    }
+
+    // Check walker convergence: when walkers approach each other, consonance emerges
+    for (let i = 0; i < NUM_WALKERS; i++) {
+      for (let j = i + 1; j < NUM_WALKERS; j++) {
+        const angle = walkers[i].current.angleTo(walkers[j].current);
+        if (angle < 0.5) {
+          // Walkers are close — boost both voices slightly
+          const boost = (0.5 - angle) * 0.02;
+          voices[i].gain.gain.linearRampToValueAtTime(
+            Math.min(voices[i].gain.gain.value + boost, 0.06), t + 1
+          );
+          voices[j].gain.gain.linearRampToValueAtTime(
+            Math.min(voices[j].gain.gain.value + boost, 0.06), t + 1
+          );
+        }
+      }
+    }
+  }
+
+  // ─── VISUAL UPDATE ───
+  function updateVisuals(dt) {
+    analyser.getByteFrequencyData(analyserData);
+
+    // Spectral average for reactivity
+    let low = 0, high = 0;
+    const half = analyserData.length / 2;
+    for (let i = 0; i < half; i++) low += analyserData[i];
+    for (let i = half; i < analyserData.length; i++) high += analyserData[i];
+    low /= half * 255;
+    high /= half * 255;
+
+    // Update particles — influenced by quaternion walkers
+    const positions = particleSystem.geometry.attributes.position.array;
+    const colors = particleSystem.geometry.attributes.color.array;
+
+    for (let i = 0; i < NUM_PARTICLES; i++) {
+      const idx = i * 3;
+      let px = positions[idx];
+      let py = positions[idx + 1];
+      let pz = positions[idx + 2];
+
+      // Each particle is influenced by the nearest walker
+      const walkerIdx = i % NUM_WALKERS;
+      const w = walkers[walkerIdx];
+
+      // Apply walker's quaternion rotation to velocity
+      const vel = particleVelocities[i];
+      const rotatedVel = vel.clone().applyQuaternion(w.current);
+
+      px += rotatedVel.x * dt * 2;
+      py += rotatedVel.y * dt * 2;
+      pz += rotatedVel.z * dt * 2;
+
+      // Gentle attraction toward walker's stereographic projection
+      const walkerPos = stereographicProject(w.current);
+      const dx = walkerPos.x * 2 - px;
+      const dy = walkerPos.y * 2 - py;
+      const dz = walkerPos.z * 2 - pz;
+      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz) + 0.1;
+
+      px += dx * 0.0003 / dist;
+      py += dy * 0.0003 / dist;
+      pz += dz * 0.0003 / dist;
+
+      // Boundary: soft push back into volume
+      const r = Math.sqrt(px * px + py * py + pz * pz);
+      if (r > 10) {
+        const pushBack = (r - 10) * 0.01;
+        px -= (px / r) * pushBack;
+        py -= (py / r) * pushBack;
+        pz -= (pz / r) * pushBack;
+      }
+      if (r < 0.5) {
+        px += (Math.random() - 0.5) * 0.1;
+        py += (Math.random() - 0.5) * 0.1;
+        pz += (Math.random() - 0.5) * 0.1;
+      }
+
+      positions[idx] = px;
+      positions[idx + 1] = py;
+      positions[idx + 2] = pz;
+
+      // Color: shift toward walker's "color" based on proximity
+      const proximity = 1 / (dist * 0.5 + 1);
+      const walkerHues = [0.65, 0.7, 0.75, 0.58]; // deep blue to violet range
+      const hue = walkerHues[walkerIdx];
+      const sat = 0.3 + proximity * 0.4 + low * 0.2;
+      const light = 0.15 + proximity * 0.2 + high * 0.15;
+
+      const c = new THREE.Color().setHSL(hue, sat, light);
+      colors[idx] = c.r;
+      colors[idx + 1] = c.g;
+      colors[idx + 2] = c.b;
+    }
+
+    particleSystem.geometry.attributes.position.needsUpdate = true;
+    particleSystem.geometry.attributes.color.needsUpdate = true;
+
+    // Particle opacity breathes with audio
+    particleSystem.material.opacity = 0.3 + low * 0.4;
+    particleSystem.material.size = 0.03 + low * 0.03;
+
+    // Camera: very slow drift
+    const camR = 8 + Math.sin(time * 0.005) * 2;
+    const camTheta = time * 0.008;
+    const camPhi = Math.PI / 2 + Math.sin(time * 0.003) * 0.3;
+    camera.position.x = camR * Math.sin(camPhi) * Math.cos(camTheta);
+    camera.position.y = camR * Math.cos(camPhi);
+    camera.position.z = camR * Math.sin(camPhi) * Math.sin(camTheta);
+    camera.lookAt(
+      Math.sin(time * 0.002) * 1,
+      Math.cos(time * 0.003) * 0.5,
+      0
+    );
+
+    // Fog density from audio
+    scene.fog.density = 0.04 + low * 0.04;
+
+    // Background color subtle shift
+    const bgHue = 0.68 + Math.sin(time * 0.002) * 0.03;
+    const bgColor = new THREE.Color().setHSL(bgHue, 0.3, 0.01 + low * 0.02);
+    renderer.setClearColor(bgColor);
+
+    // Data display
+    let html = '';
+    for (let i = 0; i < NUM_WALKERS; i++) {
+      const q = walkers[i].current;
+      html += `W${i + 1} ${q.w.toFixed(3)} ${q.x.toFixed(3)} ${q.y.toFixed(3)} ${q.z.toFixed(3)}<br>`;
+    }
+    document.getElementById('qdata').innerHTML = html;
+  }
+
+  // ─── MAIN LOOP ───
+  let lastTime = 0;
+  function animate(timestamp) {
+    requestAnimationFrame(animate);
+    const dt = Math.min((timestamp - lastTime) / 1000, 0.1);
+    lastTime = timestamp;
+    time += dt;
+
+    if (started) {
+      updateWalkers(dt);
+      updateAudio(dt);
+      updateVisuals(dt);
+    }
+
+    renderer.render(scene, camera);
+  }
+
+  function start() {
+    if (started) return;
+    started = true;
+    initAudio();
+    document.getElementById('overlay').classList.add('hidden');
+    setTimeout(() => {
+      document.getElementById('info').classList.add('visible');
+      document.getElementById('qdata').classList.add('visible');
+    }, 4000);
+  }
+
+  initScene();
+  requestAnimationFrame(animate);
+  document.getElementById('overlay').addEventListener('click', start);
+  document.addEventListener('keypress', start);
+
+})();
+</script>
+</body>
+</html>

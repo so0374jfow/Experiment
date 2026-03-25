@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Quaternion Sound Synthesis — 5 Generative Compositions</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#000;color:#fff;font-family:'Courier New',monospace;min-height:100vh;display:flex;align-items:center;justify-content:center}
+.container{max-width:640px;padding:40px 24px}
+h1{font-size:13px;font-weight:300;letter-spacing:0.4em;text-transform:uppercase;color:#667;margin-bottom:40px}
+.subtitle{font-size:10px;color:#334;letter-spacing:0.3em;margin-bottom:60px;line-height:1.8}
+.piece{margin-bottom:36px;padding-bottom:36px;border-bottom:1px solid #111}
+.piece:last-child{border-bottom:none}
+.piece a{color:#8ac;text-decoration:none;font-size:12px;letter-spacing:0.3em;text-transform:uppercase;display:block;margin-bottom:8px;transition:color 0.3s}
+.piece a:hover{color:#bdf}
+.piece .desc{font-size:9px;color:#445;letter-spacing:0.15em;line-height:1.8}
+.piece .ref{font-size:8px;color:#2a2a35;letter-spacing:0.1em;margin-top:6px;font-style:italic}
+.footer{margin-top:60px;font-size:8px;color:#222;letter-spacing:0.2em;line-height:2}
+.eq{color:#556;font-size:10px;margin-bottom:40px;letter-spacing:0.1em}
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Quaternion Sound Synthesis</h1>
+  <div class="eq">q = w + xi + yj + zk &nbsp;&nbsp;&nbsp; i&sup2; = j&sup2; = k&sup2; = ijk = &minus;1</div>
+  <div class="subtitle">
+    Five generative compositions exploring how quaternion<br>
+    imaginary numbers produce sound, space, and movement.<br>
+    Each piece auto-generates an endless orchestration.<br>
+    Click to enter. No interaction required.
+  </div>
+
+  <div class="piece">
+    <a href="v1-quat-field/">01 &mdash; QUAT.FIELD</a>
+    <div class="desc">Ultra-minimal microsound. A grid of points rotating via quaternion SLERP. Sparse sine bursts, sub-bass drones, architectural precision. Sound as spatial geometry.</div>
+    <div class="ref">After Alva Noto</div>
+  </div>
+
+  <div class="piece">
+    <a href="v2-eigenspace/">02 &mdash; EIGENSPACE</a>
+    <div class="desc">Psychoacoustic FM synthesis driven by non-commutative quaternion products. q1&middot;q2 &ne; q2&middot;q1 becomes audible spectral asymmetry. Beating frequencies, Shepard tones, perceptual instability.</div>
+    <div class="ref">After Florian Hecker</div>
+  </div>
+
+  <div class="piece">
+    <a href="v3-hamiltons-bridge/">03 &mdash; HAMILTON'S BRIDGE</a>
+    <div class="desc">The quaternion algebra itself is the composition. i, j, k are oscillators in just intonation. When i&middot;j=k, harmonic reinforcement. When i&sup2;=&minus;1, octave descent. Hopf fibration visualization.</div>
+    <div class="ref">After William Rowan Hamilton</div>
+  </div>
+
+  <div class="piece">
+    <a href="v4-rotorsound/">04 &mdash; ROTORSOUND</a>
+    <div class="desc">Kinetic sound sculpture. Orbiting rings with irrational period ratios (&pi;, e, &radic;2, &phi;) create non-repeating polyrhythm. Proximity triggers percussive tones. Quaternion rotation as rhythm machine.</div>
+    <div class="ref">After Zimoun / Ryoji Ikeda</div>
+  </div>
+
+  <div class="piece">
+    <a href="v5-manifold/">05 &mdash; MANIFOLD</a>
+    <div class="desc">Immersive drone continuum. Quaternion walkers on S&sup3; trace paths via stereographic projection. Particle clouds coalesce and dissolve. Layered harmonics over 30&ndash;120 second arcs. Rotation space is continuous.</div>
+    <div class="ref">After &Eacute;liane Radigue</div>
+  </div>
+
+  <div class="footer">
+    Quaternion sound synthesis after DAFx 2020<br>
+    Three.js + Web Audio API<br>
+    Each composition is endless and generative
+  </div>
+</div>
+</body>
+</html>

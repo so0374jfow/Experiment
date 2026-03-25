@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EIGENSPACE — Quaternion Sound Synthesis v2</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#000;overflow:hidden;font-family:'Courier New',monospace;color:#fff}
+canvas{display:block}
+#overlay{position:fixed;top:0;left:0;width:100%;height:100%;display:flex;align-items:center;justify-content:center;z-index:10;background:#000;cursor:pointer;transition:opacity 2s}
+#overlay.hidden{opacity:0;pointer-events:none}
+#overlay-text{text-align:center;letter-spacing:0.3em}
+#overlay-text h1{font-size:14px;font-weight:300;margin-bottom:8px;color:#f4a}
+#overlay-text p{font-size:10px;font-weight:300;color:#432;letter-spacing:0.5em}
+#info{position:fixed;bottom:12px;left:12px;font-size:9px;color:#321;letter-spacing:0.2em;z-index:5;opacity:0;transition:opacity 3s}
+#info.visible{opacity:1}
+#qdata{position:fixed;top:12px;right:12px;font-size:8px;color:#2a1a2a;letter-spacing:0.1em;z-index:5;text-align:right;opacity:0;transition:opacity 3s;line-height:1.6}
+#qdata.visible{opacity:1}
+</style>
+</head>
+<body>
+<div id="overlay">
+  <div id="overlay-text">
+    <h1>eigenspace</h1>
+    <p>click to begin</p>
+  </div>
+</div>
+<div id="info">EIGENSPACE — psychoacoustic quaternion synthesis v2</div>
+<div id="qdata"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function() {
+  'use strict';
+
+  let audioCtx, masterGain, analyser, analyserData, analyserWave;
+  let scene, camera, renderer;
+  let started = false;
+  let time = 0;
+
+  // Two independent quaternions for non-commutative operations
+  const q1 = new THREE.Quaternion();
+  const q2 = new THREE.Quaternion();
+  const q1Target = new THREE.Quaternion();
+  const q2Target = new THREE.Quaternion();
+  let q1Timer = 0, q2Timer = 0;
+  const Q1_INTERVAL = 12, Q2_INTERVAL = 17; // prime-ish intervals
+
+  // FM synthesis pairs
+  const carriers = [];
+  const modulators = [];
+  const carrierGains = [];
+  const modGains = [];
+  const NUM_PAIRS = 4;
+
+  // Beating pair
+  let beatOsc1, beatOsc2, beatGain;
+
+  // Visual ribbons
+  const ribbons = [];
+  const NUM_RIBBONS = 5;
+
+  // ─── AUDIO ───
+  function initAudio() {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    masterGain = audioCtx.createGain();
+    masterGain.gain.value = 0;
+
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 1024;
+    analyserData = new Uint8Array(analyser.frequencyBinCount);
+    analyserWave = new Uint8Array(analyser.fftSize);
+
+    // Compressor to tame FM wildness
+    const compressor = audioCtx.createDynamicsCompressor();
+    compressor.threshold.value = -20;
+    compressor.ratio.value = 8;
+    compressor.attack.value = 0.003;
+    compressor.release.value = 0.1;
+
+    masterGain.connect(compressor);
+    compressor.connect(analyser);
+    analyser.connect(audioCtx.destination);
+
+    // FM synthesis pairs
+    const baseFreqs = [110, 220, 330, 550];
+    for (let i = 0; i < NUM_PAIRS; i++) {
+      const modulator = audioCtx.createOscillator();
+      modulator.type = 'sine';
+      modulator.frequency.value = baseFreqs[i] * 1.5;
+
+      const modGain = audioCtx.createGain();
+      modGain.gain.value = 100; // modulation depth
+
+      const carrier = audioCtx.createOscillator();
+      carrier.type = 'sine';
+      carrier.frequency.value = baseFreqs[i];
+
+      const carrierGain = audioCtx.createGain();
+      carrierGain.gain.value = 0;
+
+      const filter = audioCtx.createBiquadFilter();
+      filter.type = 'bandpass';
+      filter.frequency.value = baseFreqs[i] * 2;
+      filter.Q.value = 3;
+
+      // FM: modulator → modGain → carrier.frequency
+      modulator.connect(modGain);
+      modGain.connect(carrier.frequency);
+
+      carrier.connect(carrierGain);
+      carrierGain.connect(filter);
+      filter.connect(masterGain);
+
+      modulator.start();
+      carrier.start();
+
+      carriers.push(carrier);
+      modulators.push(modulator);
+      carrierGains.push(carrierGain);
+      modGains.push(modGain);
+    }
+
+    // Beating frequency pair (creates auditory roughness)
+    beatOsc1 = audioCtx.createOscillator();
+    beatOsc2 = audioCtx.createOscillator();
+    beatOsc1.type = 'sine';
+    beatOsc2.type = 'sine';
+    beatOsc1.frequency.value = 440;
+    beatOsc2.frequency.value = 443;
+    beatGain = audioCtx.createGain();
+    beatGain.gain.value = 0;
+
+    beatOsc1.connect(beatGain);
+    beatOsc2.connect(beatGain);
+    beatGain.connect(masterGain);
+    beatOsc1.start();
+    beatOsc2.start();
+
+    // Shepard tone layer — octave-spaced oscillators
+    const shepardFreqs = [55, 110, 220, 440, 880, 1760];
+    shepardFreqs.forEach((f, i) => {
+      const osc = audioCtx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.value = f;
+      const g = audioCtx.createGain();
+      // Bell curve amplitude: louder in middle octaves
+      const dist = Math.abs(i - 2.5) / 2.5;
+      g.gain.value = 0;
+      osc.connect(g);
+      g.connect(masterGain);
+      osc.start();
+      // Store for later manipulation
+      carriers.push(osc);
+      carrierGains.push(g);
+    });
+
+    // Fade in
+    masterGain.gain.linearRampToValueAtTime(0.08, audioCtx.currentTime + 4);
+  }
+
+  // ─── SCENE ───
+  function initScene() {
+    scene = new THREE.Scene();
+    camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 100);
+    camera.position.set(0, 0, 8);
+
+    renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setClearColor(0x020004);
+    document.body.appendChild(renderer.domElement);
+
+    // Create ribbon geometries — spectral bands that twist
+    for (let r = 0; r < NUM_RIBBONS; r++) {
+      const curve = new THREE.CatmullRomCurve3(generateRibbonPoints(r));
+      const geo = new THREE.TubeGeometry(curve, 128, 0.02 + r * 0.008, 8, false);
+      const hue = r / NUM_RIBBONS;
+      const mat = new THREE.MeshBasicMaterial({
+        color: new THREE.Color().setHSL(hue, 0.8, 0.5),
+        transparent: true,
+        opacity: 0.4,
+        wireframe: true
+      });
+      const mesh = new THREE.Mesh(geo, mat);
+      scene.add(mesh);
+      ribbons.push({ mesh, curve, hue, phase: r * 1.3 });
+    }
+
+    window.addEventListener('resize', onResize);
+  }
+
+  function generateRibbonPoints(seed) {
+    const points = [];
+    for (let i = 0; i < 64; i++) {
+      const t = i / 63;
+      const angle = t * Math.PI * 4 + seed;
+      const radius = 2 + Math.sin(t * Math.PI * 3 + seed * 2) * 1.5;
+      points.push(new THREE.Vector3(
+        Math.cos(angle) * radius,
+        Math.sin(angle * 0.7 + seed) * 2,
+        Math.sin(angle) * radius
+      ));
+    }
+    return points;
+  }
+
+  function onResize() {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  }
+
+  // ─── QUATERNION LOGIC ───
+  function randomQuat(target) {
+    const axis = new THREE.Vector3(
+      Math.random() * 2 - 1,
+      Math.random() * 2 - 1,
+      Math.random() * 2 - 1
+    ).normalize();
+    target.setFromAxisAngle(axis, Math.random() * Math.PI * 2);
+  }
+
+  function updateQuaternions(dt) {
+    q1Timer += dt;
+    q2Timer += dt;
+    if (q1Timer > Q1_INTERVAL) { q1Timer = 0; randomQuat(q1Target); }
+    if (q2Timer > Q2_INTERVAL) { q2Timer = 0; randomQuat(q2Target); }
+
+    q1.slerp(q1Target, 0.005);
+    q2.slerp(q2Target, 0.004);
+  }
+
+  // Non-commutative quaternion product
+  function quatMultiply(a, b) {
+    return new THREE.Quaternion(
+      a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+      a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+      a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+      a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z
+    );
+  }
+
+  // ─── AUDIO UPDATE ───
+  function updateAudio(dt) {
+    const t = audioCtx.currentTime;
+
+    // Compute non-commutative products
+    const q1q2 = quatMultiply(q1, q2);
+    const q2q1 = quatMultiply(q2, q1);
+
+    // The difference between q1*q2 and q2*q1 — the "commutator"
+    const commDiff = {
+      x: q1q2.x - q2q1.x,
+      y: q1q2.y - q2q1.y,
+      z: q1q2.z - q2q1.z,
+      w: q1q2.w - q2q1.w
+    };
+    const commMag = Math.sqrt(commDiff.x**2 + commDiff.y**2 + commDiff.z**2 + commDiff.w**2);
+
+    // FM pairs: carrier from q1*q2, modulator ratio from q2*q1
+    for (let i = 0; i < NUM_PAIRS; i++) {
+      const baseFreq = [110, 220, 330, 550][i];
+      const carrierFreq = baseFreq * (1 + Math.abs(q1q2.x + q1q2.y) * 0.5);
+      const modRatio = 1 + Math.abs(q2q1.z + q2q1.w) * 2;
+      const modDepth = 50 + commMag * 800; // more non-commutativity = more FM depth
+
+      carriers[i].frequency.exponentialRampToValueAtTime(Math.max(carrierFreq, 20), t + 0.15);
+      modulators[i].frequency.exponentialRampToValueAtTime(Math.max(carrierFreq * modRatio, 20), t + 0.15);
+      modGains[i].gain.linearRampToValueAtTime(modDepth, t + 0.2);
+      carrierGains[i].gain.linearRampToValueAtTime(0.015 + commMag * 0.02, t + 0.2);
+    }
+
+    // Beating pair: interval from angleTo between q1 and q2
+    const angle = q1.angleTo(q2);
+    const beatCenter = 300 + angle * 100;
+    const beatInterval = 1 + commMag * 8; // 1-9 Hz beating
+    beatOsc1.frequency.exponentialRampToValueAtTime(Math.max(beatCenter, 20), t + 0.2);
+    beatOsc2.frequency.exponentialRampToValueAtTime(Math.max(beatCenter + beatInterval, 20), t + 0.2);
+    beatGain.gain.linearRampToValueAtTime(0.02 + commMag * 0.03, t + 0.3);
+
+    // Shepard tones: slowly shift all up, creating illusion of endless rise
+    const shepardShift = (time * 0.3) % 1; // 0 to 1 cycling
+    for (let i = NUM_PAIRS; i < carriers.length; i++) {
+      const baseIdx = i - NUM_PAIRS;
+      const octave = baseIdx;
+      const freq = 55 * Math.pow(2, octave + shepardShift);
+      carriers[i].frequency.exponentialRampToValueAtTime(Math.max(freq, 20), t + 0.1);
+      // Bell curve: fade in/out as frequency approaches hearing limits
+      const normFreq = Math.log2(freq / 55) / 6; // 0 to 1 across range
+      const amp = Math.sin(normFreq * Math.PI) * 0.008;
+      carrierGains[i].gain.linearRampToValueAtTime(Math.max(amp, 0), t + 0.1);
+    }
+  }
+
+  // ─── VISUAL UPDATE ───
+  function updateVisuals(dt) {
+    analyser.getByteFrequencyData(analyserData);
+
+    // Compute spectral bands
+    const bands = [0, 0, 0, 0, 0];
+    const bandSize = Math.floor(analyserData.length / 5);
+    for (let b = 0; b < 5; b++) {
+      for (let i = 0; i < bandSize; i++) {
+        bands[b] += analyserData[b * bandSize + i];
+      }
+      bands[b] /= bandSize * 255;
+    }
+
+    // Update ribbons with quaternion-driven deformation
+    for (let r = 0; r < NUM_RIBBONS; r++) {
+      const ribbon = ribbons[r];
+      const bandVal = bands[r] || 0;
+
+      // Rebuild curve points with quaternion influence
+      const points = [];
+      for (let i = 0; i < 64; i++) {
+        const s = i / 63;
+        const angle = s * Math.PI * 4 + ribbon.phase + time * 0.1;
+        const radius = 2 + Math.sin(s * Math.PI * 3 + time * 0.05 + ribbon.phase) * (1.5 + bandVal * 2);
+
+        const p = new THREE.Vector3(
+          Math.cos(angle) * radius,
+          Math.sin(angle * 0.7 + ribbon.phase + time * 0.03) * (2 + bandVal * 1.5),
+          Math.sin(angle) * radius
+        );
+
+        // Apply quaternion rotation to each point
+        const blendQ = new THREE.Quaternion().copy(q1).slerp(q2, s);
+        p.applyQuaternion(blendQ);
+        points.push(p);
+      }
+
+      // Dispose old geometry and create new
+      ribbon.mesh.geometry.dispose();
+      const curve = new THREE.CatmullRomCurve3(points);
+      ribbon.mesh.geometry = new THREE.TubeGeometry(curve, 128, 0.015 + bandVal * 0.03, 6, false);
+
+      // Color from spectrum
+      const hue = (ribbon.hue + time * 0.01 + bandVal * 0.3) % 1;
+      ribbon.mesh.material.color.setHSL(hue, 0.7 + bandVal * 0.3, 0.4 + bandVal * 0.3);
+      ribbon.mesh.material.opacity = 0.2 + bandVal * 0.5;
+    }
+
+    // Camera: slow disorienting drift
+    const cx = Math.sin(time * 0.023) * 6 + Math.cos(time * 0.017) * 2;
+    const cy = Math.cos(time * 0.019) * 4;
+    const cz = Math.cos(time * 0.013) * 6 + Math.sin(time * 0.029) * 2;
+    camera.position.set(cx, cy, cz);
+    camera.lookAt(Math.sin(time * 0.007) * 2, 0, Math.cos(time * 0.011) * 2);
+
+    // Background color pulse
+    const bgR = 0.008 + bands[0] * 0.03;
+    const bgG = 0.0;
+    const bgB = 0.015 + bands[4] * 0.04;
+    renderer.setClearColor(new THREE.Color(bgR, bgG, bgB));
+
+    // Quaternion data
+    const q1q2 = quatMultiply(q1, q2);
+    const q2q1 = quatMultiply(q2, q1);
+    document.getElementById('qdata').innerHTML =
+      `q1*q2 ${q1q2.w.toFixed(3)} ${q1q2.x.toFixed(3)} ${q1q2.y.toFixed(3)} ${q1q2.z.toFixed(3)}<br>` +
+      `q2*q1 ${q2q1.w.toFixed(3)} ${q2q1.x.toFixed(3)} ${q2q1.y.toFixed(3)} ${q2q1.z.toFixed(3)}`;
+  }
+
+  // ─── MAIN LOOP ───
+  let lastTime = 0;
+  function animate(timestamp) {
+    requestAnimationFrame(animate);
+    const dt = Math.min((timestamp - lastTime) / 1000, 0.1);
+    lastTime = timestamp;
+    time += dt;
+
+    if (started) {
+      updateQuaternions(dt);
+      updateAudio(dt);
+      updateVisuals(dt);
+    }
+
+    renderer.render(scene, camera);
+  }
+
+  function start() {
+    if (started) return;
+    started = true;
+    initAudio();
+    randomQuat(q1Target);
+    randomQuat(q2Target);
+    randomQuat(q1);
+    randomQuat(q2);
+
+    document.getElementById('overlay').classList.add('hidden');
+    setTimeout(() => {
+      document.getElementById('info').classList.add('visible');
+      document.getElementById('qdata').classList.add('visible');
+    }, 2500);
+  }
+
+  initScene();
+  requestAnimationFrame(animate);
+  document.getElementById('overlay').addEventListener('click', start);
+  document.addEventListener('keypress', start);
+
+})();
+</script>
+</body>
+</html>

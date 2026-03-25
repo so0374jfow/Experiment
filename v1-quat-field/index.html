@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>QUAT.FIELD — Quaternion Sound Synthesis v1</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#000;overflow:hidden;font-family:'Courier New',monospace;color:#fff}
+canvas{display:block}
+#overlay{position:fixed;top:0;left:0;width:100%;height:100%;display:flex;align-items:center;justify-content:center;z-index:10;background:#000;cursor:pointer;transition:opacity 1.5s}
+#overlay.hidden{opacity:0;pointer-events:none}
+#overlay-text{text-align:center;letter-spacing:0.3em;text-transform:uppercase}
+#overlay-text h1{font-size:14px;font-weight:300;margin-bottom:8px;color:#8af}
+#overlay-text p{font-size:10px;font-weight:300;color:#446;letter-spacing:0.5em}
+#info{position:fixed;bottom:12px;left:12px;font-size:9px;color:#223;letter-spacing:0.2em;z-index:5;opacity:0;transition:opacity 3s}
+#info.visible{opacity:1}
+#qdata{position:fixed;top:12px;right:12px;font-size:9px;color:#1a2a3a;letter-spacing:0.1em;z-index:5;text-align:right;opacity:0;transition:opacity 3s}
+#qdata.visible{opacity:1}
+</style>
+</head>
+<body>
+<div id="overlay">
+  <div id="overlay-text">
+    <h1>quat.field</h1>
+    <p>click to begin</p>
+  </div>
+</div>
+<div id="info">QUAT.FIELD — quaternion microsound synthesis v1</div>
+<div id="qdata"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function() {
+  'use strict';
+
+  // ─── STATE ───
+  let audioCtx, masterGain, analyser, analyserData;
+  let scene, camera, renderer;
+  let gridGroup, linesMesh, pointsMesh;
+  let started = false;
+  let time = 0;
+
+  // Quaternion state
+  const currentQuat = new THREE.Quaternion();
+  const targetQuat = new THREE.Quaternion();
+  let quatChangeTimer = 0;
+  const QUAT_CHANGE_INTERVAL = 18; // seconds
+
+  // Oscillators
+  const oscillators = [];
+  const gains = [];
+  const filters = [];
+  const NUM_OSC = 4;
+
+  // Grid
+  const GRID_SIZE = 6;
+  const GRID_SPACING = 1.2;
+  const gridPositions = [];
+
+  // ─── AUDIO SETUP ───
+  function initAudio() {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    masterGain = audioCtx.createGain();
+    masterGain.gain.value = 0;
+
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 256;
+    analyserData = new Uint8Array(analyser.frequencyBinCount);
+
+    masterGain.connect(analyser);
+    analyser.connect(audioCtx.destination);
+
+    // Create 4 oscillators: sub-bass drone + 3 sine voices
+    const baseFreqs = [55, 220, 440, 880];
+    const types = ['sine', 'sine', 'sine', 'sine'];
+
+    for (let i = 0; i < NUM_OSC; i++) {
+      const osc = audioCtx.createOscillator();
+      osc.type = types[i];
+      osc.frequency.value = baseFreqs[i];
+
+      const filter = audioCtx.createBiquadFilter();
+      filter.type = 'lowpass';
+      filter.frequency.value = 2000;
+      filter.Q.value = 1;
+
+      const gain = audioCtx.createGain();
+      gain.gain.value = 0;
+
+      osc.connect(filter);
+      filter.connect(gain);
+      gain.connect(masterGain);
+      osc.start();
+
+      oscillators.push(osc);
+      gains.push(gain);
+      filters.push(filter);
+    }
+
+    // Fade in master
+    masterGain.gain.linearRampToValueAtTime(0.12, audioCtx.currentTime + 3);
+  }
+
+  // ─── SCENE SETUP ───
+  function initScene() {
+    scene = new THREE.Scene();
+    camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100);
+    camera.position.set(0, 0, 14);
+
+    renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setClearColor(0x000000);
+    document.body.appendChild(renderer.domElement);
+
+    // Grid group
+    gridGroup = new THREE.Group();
+    scene.add(gridGroup);
+
+    // Create point grid
+    const positions = [];
+    const half = (GRID_SIZE - 1) * GRID_SPACING / 2;
+
+    for (let x = 0; x < GRID_SIZE; x++) {
+      for (let y = 0; y < GRID_SIZE; y++) {
+        for (let z = 0; z < GRID_SIZE; z++) {
+          const px = x * GRID_SPACING - half;
+          const py = y * GRID_SPACING - half;
+          const pz = z * GRID_SPACING - half;
+          positions.push(px, py, pz);
+          gridPositions.push(new THREE.Vector3(px, py, pz));
+        }
+      }
+    }
+
+    // Points
+    const pointsGeo = new THREE.BufferGeometry();
+    pointsGeo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    const pointsMat = new THREE.PointsMaterial({
+      color: 0x88aaff,
+      size: 0.04,
+      sizeAttenuation: true,
+      transparent: true,
+      opacity: 0.7
+    });
+    pointsMesh = new THREE.Points(pointsGeo, pointsMat);
+    gridGroup.add(pointsMesh);
+
+    // Lines connecting nearest neighbors
+    const linePositions = [];
+    for (let i = 0; i < gridPositions.length; i++) {
+      for (let j = i + 1; j < gridPositions.length; j++) {
+        const dist = gridPositions[i].distanceTo(gridPositions[j]);
+        if (dist < GRID_SPACING * 1.05) {
+          linePositions.push(
+            gridPositions[i].x, gridPositions[i].y, gridPositions[i].z,
+            gridPositions[j].x, gridPositions[j].y, gridPositions[j].z
+          );
+        }
+      }
+    }
+
+    const linesGeo = new THREE.BufferGeometry();
+    linesGeo.setAttribute('position', new THREE.Float32BufferAttribute(linePositions, 3));
+    const linesMat = new THREE.LineBasicMaterial({
+      color: 0x223344,
+      transparent: true,
+      opacity: 0.15
+    });
+    linesMesh = new THREE.LineSegments(linesGeo, linesMat);
+    gridGroup.add(linesMesh);
+
+    window.addEventListener('resize', onResize);
+  }
+
+  function onResize() {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  }
+
+  // ─── QUATERNION LOGIC ───
+  function generateTargetQuat() {
+    const axis = new THREE.Vector3(
+      Math.random() * 2 - 1,
+      Math.random() * 2 - 1,
+      Math.random() * 2 - 1
+    ).normalize();
+    const angle = Math.random() * Math.PI * 0.6;
+    targetQuat.setFromAxisAngle(axis, angle);
+  }
+
+  function updateQuaternion(dt) {
+    quatChangeTimer += dt;
+    if (quatChangeTimer > QUAT_CHANGE_INTERVAL) {
+      quatChangeTimer = 0;
+      generateTargetQuat();
+    }
+
+    // Very slow SLERP — glacial movement
+    currentQuat.slerp(targetQuat, 0.003);
+    gridGroup.quaternion.copy(currentQuat);
+  }
+
+  // ─── AUDIO UPDATE ───
+  function updateAudio(dt) {
+    const t = audioCtx.currentTime;
+    const q = currentQuat;
+
+    // Extract Euler angles for frequency mapping
+    const euler = new THREE.Euler().setFromQuaternion(q);
+
+    // Sub-bass drone: 40-80 Hz from w component
+    const subFreq = 40 + Math.abs(q.w) * 40;
+    oscillators[0].frequency.exponentialRampToValueAtTime(Math.max(subFreq, 20), t + 0.5);
+    gains[0].gain.linearRampToValueAtTime(0.08, t + 0.3);
+
+    // Sine voices: activated by quaternion component thresholds
+    // Voice 1: from x component
+    const v1Active = Math.abs(q.x) > 0.3;
+    const v1Freq = 180 + Math.abs(euler.x) * 120;
+    oscillators[1].frequency.exponentialRampToValueAtTime(Math.max(v1Freq, 20), t + 0.2);
+    gains[1].gain.linearRampToValueAtTime(v1Active ? 0.04 : 0.0, t + 0.15);
+
+    // Voice 2: from y component
+    const v2Active = Math.abs(q.y) > 0.35;
+    const v2Freq = 330 + Math.abs(euler.y) * 200;
+    oscillators[2].frequency.exponentialRampToValueAtTime(Math.max(v2Freq, 20), t + 0.2);
+    gains[2].gain.linearRampToValueAtTime(v2Active ? 0.03 : 0.0, t + 0.15);
+
+    // Voice 3: from z component — high register clicks
+    const v3Active = Math.abs(q.z) > 0.4;
+    const v3Freq = 880 + Math.abs(euler.z) * 400;
+    oscillators[3].frequency.exponentialRampToValueAtTime(Math.max(v3Freq, 20), t + 0.1);
+
+    if (v3Active && gains[3].gain.value < 0.01) {
+      // Click onset — very short burst
+      gains[3].gain.setValueAtTime(0.06, t);
+      gains[3].gain.exponentialRampToValueAtTime(0.001, t + 0.08);
+    } else if (!v3Active) {
+      gains[3].gain.linearRampToValueAtTime(0.0, t + 0.3);
+    }
+
+    // Filter cutoff from quaternion magnitude deviation
+    const qMag = Math.sqrt(q.x * q.x + q.y * q.y + q.z * q.z);
+    const cutoff = 800 + qMag * 3000;
+    for (let i = 0; i < NUM_OSC; i++) {
+      filters[i].frequency.exponentialRampToValueAtTime(Math.max(cutoff, 100), t + 0.3);
+    }
+  }
+
+  // ─── VISUAL UPDATE ───
+  function updateVisuals(dt) {
+    // Audio-reactive point size
+    analyser.getByteFrequencyData(analyserData);
+    let avg = 0;
+    for (let i = 0; i < analyserData.length; i++) avg += analyserData[i];
+    avg /= analyserData.length * 255;
+
+    pointsMesh.material.size = 0.03 + avg * 0.06;
+    pointsMesh.material.opacity = 0.4 + avg * 0.5;
+    linesMesh.material.opacity = 0.08 + avg * 0.12;
+
+    // Subtle color shift
+    const hue = 0.6 + Math.sin(time * 0.02) * 0.05;
+    pointsMesh.material.color.setHSL(hue, 0.4, 0.6 + avg * 0.2);
+
+    // Camera slow orbit
+    const camAngle = time * 0.015;
+    camera.position.x = Math.sin(camAngle) * 14;
+    camera.position.z = Math.cos(camAngle) * 14;
+    camera.position.y = Math.sin(time * 0.008) * 3;
+    camera.lookAt(0, 0, 0);
+
+    // Occasional glitch flash on grid edges
+    if (Math.random() < 0.002) {
+      linesMesh.material.opacity = 0.6;
+      linesMesh.material.color.setHex(0xffffff);
+      setTimeout(() => {
+        linesMesh.material.opacity = 0.1;
+        linesMesh.material.color.setHex(0x223344);
+      }, 50);
+    }
+
+    // Update quaternion data display
+    const q = currentQuat;
+    document.getElementById('qdata').innerHTML =
+      `w ${q.w.toFixed(4)}<br>x ${q.x.toFixed(4)}<br>y ${q.y.toFixed(4)}<br>z ${q.z.toFixed(4)}`;
+  }
+
+  // ─── MAIN LOOP ───
+  let lastTime = 0;
+  function animate(timestamp) {
+    requestAnimationFrame(animate);
+    const dt = Math.min((timestamp - lastTime) / 1000, 0.1);
+    lastTime = timestamp;
+    time += dt;
+
+    if (started) {
+      updateQuaternion(dt);
+      updateAudio(dt);
+      updateVisuals(dt);
+    }
+
+    renderer.render(scene, camera);
+  }
+
+  // ─── START ───
+  function start() {
+    if (started) return;
+    started = true;
+
+    initAudio();
+    generateTargetQuat();
+
+    document.getElementById('overlay').classList.add('hidden');
+    setTimeout(() => {
+      document.getElementById('info').classList.add('visible');
+      document.getElementById('qdata').classList.add('visible');
+    }, 2000);
+  }
+
+  // Init
+  initScene();
+  requestAnimationFrame(animate);
+  document.getElementById('overlay').addEventListener('click', start);
+  document.addEventListener('keypress', start);
+
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ROTORSOUND — Quaternion Sound Synthesis v4</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0a0a0a;overflow:hidden;font-family:'Courier New',monospace;color:#fff}
+canvas{display:block}
+#overlay{position:fixed;top:0;left:0;width:100%;height:100%;display:flex;align-items:center;justify-content:center;z-index:10;background:#0a0a0a;cursor:pointer;transition:opacity 2s}
+#overlay.hidden{opacity:0;pointer-events:none}
+#overlay-text{text-align:center;letter-spacing:0.3em}
+#overlay-text h1{font-size:14px;font-weight:300;margin-bottom:8px;color:#ddc}
+#overlay-text p{font-size:10px;font-weight:300;color:#554;letter-spacing:0.5em}
+#info{position:fixed;bottom:12px;left:12px;font-size:9px;color:#333;letter-spacing:0.2em;z-index:5;opacity:0;transition:opacity 3s}
+#info.visible{opacity:1}
+#qdata{position:fixed;top:12px;right:12px;font-size:8px;color:#2a2a25;letter-spacing:0.1em;z-index:5;text-align:right;opacity:0;transition:opacity 3s;line-height:1.6}
+#qdata.visible{opacity:1}
+</style>
+</head>
+<body>
+<div id="overlay">
+  <div id="overlay-text">
+    <h1>rotorsound</h1>
+    <p>click to begin</p>
+  </div>
+</div>
+<div id="info">ROTORSOUND — kinetic quaternion polyrhythm v4</div>
+<div id="qdata"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function() {
+  'use strict';
+
+  let audioCtx, masterGain, analyser, analyserData;
+  let scene, camera, renderer;
+  let started = false;
+  let time = 0;
+
+  // Orbital rings
+  const NUM_RINGS = 6;
+  const rings = [];
+
+  // Irrational period ratios for polyrhythm
+  const PERIODS = [
+    Math.PI,           // ~3.14s
+    Math.E,            // ~2.72s
+    Math.sqrt(2) * 2,  // ~2.83s
+    (1 + Math.sqrt(5)) / 2 * 2, // φ*2 ≈ 3.24s
+    Math.sqrt(3) * 1.5, // ~2.60s
+    Math.PI * 0.7       // ~2.20s
+  ];
+
+  // ─── AUDIO ───
+  function initAudio() {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    masterGain = audioCtx.createGain();
+    masterGain.gain.value = 0;
+
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 256;
+    analyserData = new Uint8Array(analyser.frequencyBinCount);
+
+    // Reverb via feedback delay
+    const delay = audioCtx.createDelay(1.0);
+    delay.delayTime.value = 0.3;
+    const feedback = audioCtx.createGain();
+    feedback.gain.value = 0.35;
+    const reverbFilter = audioCtx.createBiquadFilter();
+    reverbFilter.type = 'lowpass';
+    reverbFilter.frequency.value = 3000;
+
+    masterGain.connect(delay);
+    delay.connect(feedback);
+    feedback.connect(reverbFilter);
+    reverbFilter.connect(delay); // feedback loop
+    delay.connect(analyser);
+    masterGain.connect(analyser);
+    analyser.connect(audioCtx.destination);
+
+    // Create oscillators and panners for each ring
+    const notes = [196, 262, 330, 392, 494, 587]; // G3, C4, E4, G4, B4, D5
+
+    for (let i = 0; i < NUM_RINGS; i++) {
+      const osc = audioCtx.createOscillator();
+      osc.type = 'triangle';
+      osc.frequency.value = notes[i];
+
+      const gain = audioCtx.createGain();
+      gain.gain.value = 0;
+
+      const panner = audioCtx.createStereoPanner();
+      panner.pan.value = 0;
+
+      const filter = audioCtx.createBiquadFilter();
+      filter.type = 'bandpass';
+      filter.frequency.value = notes[i] * 2;
+      filter.Q.value = 2;
+
+      osc.connect(gain);
+      gain.connect(filter);
+      filter.connect(panner);
+      panner.connect(masterGain);
+      osc.start();
+
+      // Ring quaternion: unique rotation axis
+      const axis = new THREE.Vector3(
+        Math.sin(i * 1.1),
+        Math.cos(i * 0.7),
+        Math.sin(i * 1.9 + 0.5)
+      ).normalize();
+
+      const ringQuat = new THREE.Quaternion().setFromAxisAngle(axis, 0);
+
+      rings.push({
+        osc, gain, panner, filter,
+        note: notes[i],
+        period: PERIODS[i],
+        axis: axis,
+        quat: ringQuat,
+        angle: Math.random() * Math.PI * 2, // orbital angle of sound source
+        ringMesh: null,
+        sphereMesh: null,
+        lastProximity: 0
+      });
+    }
+
+    masterGain.gain.linearRampToValueAtTime(0.2, audioCtx.currentTime + 3);
+  }
+
+  // ─── SCENE ───
+  function initScene() {
+    scene = new THREE.Scene();
+    camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 100);
+    camera.position.set(0, 0, 12);
+
+    renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setClearColor(0x0a0a0a);
+    document.body.appendChild(renderer.domElement);
+
+    // Create ring geometries
+    const ringRadii = [3, 3.5, 4, 4.5, 5, 5.5];
+    const ringColors = [0xddddcc, 0xccccbb, 0xbbbbaa, 0xaaaa99, 0x999988, 0x888877];
+
+    for (let i = 0; i < NUM_RINGS; i++) {
+      // Torus ring
+      const torusGeo = new THREE.TorusGeometry(ringRadii[i], 0.01, 8, 64);
+      const torusMat = new THREE.MeshBasicMaterial({
+        color: ringColors[i],
+        wireframe: false,
+        transparent: true,
+        opacity: 0.25
+      });
+      const torus = new THREE.Mesh(torusGeo, torusMat);
+      scene.add(torus);
+      rings[i].ringMesh = torus;
+
+      // Small sphere orbiting the ring (sound source marker)
+      const sphereGeo = new THREE.SphereGeometry(0.08, 8, 8);
+      const sphereMat = new THREE.MeshBasicMaterial({
+        color: 0xffffff,
+        transparent: true,
+        opacity: 0.8
+      });
+      const sphere = new THREE.Mesh(sphereGeo, sphereMat);
+      scene.add(sphere);
+      rings[i].sphereMesh = sphere;
+    }
+
+    // Central point — listener position
+    const centerGeo = new THREE.SphereGeometry(0.04, 8, 8);
+    const centerMat = new THREE.MeshBasicMaterial({ color: 0x444440 });
+    scene.add(new THREE.Mesh(centerGeo, centerMat));
+
+    window.addEventListener('resize', onResize);
+  }
+
+  function onResize() {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  }
+
+  // ─── UPDATE ───
+  function update(dt) {
+    const t = audioCtx.currentTime;
+    let qdataHTML = '';
+
+    for (let i = 0; i < NUM_RINGS; i++) {
+      const ring = rings[i];
+
+      // Advance orbital angle based on irrational period
+      const angularVelocity = (Math.PI * 2) / ring.period;
+      ring.angle += angularVelocity * dt;
+
+      // Update ring quaternion — slow rotation of the ring plane itself
+      const ringRotSpeed = 0.05 + i * 0.01;
+      const newAngle = time * ringRotSpeed;
+      ring.quat.setFromAxisAngle(ring.axis, newAngle);
+
+      // Apply quaternion to ring mesh
+      ring.ringMesh.quaternion.copy(ring.quat);
+
+      // Compute orbiting sphere position
+      // Start in XZ plane, then rotate by ring quaternion
+      const radius = 3 + i * 0.5;
+      const localPos = new THREE.Vector3(
+        Math.cos(ring.angle) * radius,
+        0,
+        Math.sin(ring.angle) * radius
+      );
+      localPos.applyQuaternion(ring.quat);
+      ring.sphereMesh.position.copy(localPos);
+
+      // Proximity to camera (listener)
+      const distToCamera = localPos.distanceTo(camera.position);
+      const maxDist = 15;
+      const proximity = 1 - Math.min(distToCamera / maxDist, 1);
+
+      // Trigger tone when sphere passes closest point
+      const isApproaching = proximity > ring.lastProximity;
+      const isPeak = ring.lastProximity > proximity && ring.lastProximity > 0.5;
+
+      if (isPeak) {
+        // Percussive burst — short attack, fast decay
+        ring.gain.gain.setValueAtTime(0.08 * ring.lastProximity, t);
+        ring.gain.gain.exponentialRampToValueAtTime(0.001, t + 0.15 + i * 0.05);
+      }
+
+      // Continuous spatial panning from position
+      const panAngle = Math.atan2(localPos.x, localPos.z);
+      ring.panner.pan.linearRampToValueAtTime(
+        Math.sin(panAngle) * 0.8,
+        t + 0.05
+      );
+
+      // Subtle continuous tone modulated by distance
+      const continuousLevel = proximity * 0.008;
+      if (!isPeak) {
+        ring.gain.gain.linearRampToValueAtTime(
+          Math.max(ring.gain.gain.value, continuousLevel),
+          t + 0.1
+        );
+      }
+
+      // Frequency shifts slightly based on angular velocity (Doppler-like)
+      const dopplerShift = isApproaching ? 1.01 : 0.99;
+      ring.osc.frequency.exponentialRampToValueAtTime(
+        Math.max(ring.note * dopplerShift, 20),
+        t + 0.05
+      );
+
+      ring.lastProximity = proximity;
+
+      // Check for ring alignment (two rings' quaternions close)
+      for (let j = i + 1; j < NUM_RINGS; j++) {
+        const angleBetween = ring.quat.angleTo(rings[j].quat);
+        if (angleBetween < 0.3) {
+          // Brief accent when rings align
+          ring.ringMesh.material.opacity = 0.5;
+          rings[j].ringMesh.material.opacity = 0.5;
+        }
+      }
+
+      // Visual: sphere brightness from proximity
+      ring.sphereMesh.material.opacity = 0.2 + proximity * 0.8;
+      ring.sphereMesh.scale.setScalar(0.8 + proximity * 1.5);
+      ring.ringMesh.material.opacity = 0.12 + proximity * 0.15;
+
+      // Data display
+      const q = ring.quat;
+      qdataHTML += `R${i + 1} ω=${angularVelocity.toFixed(2)} p=${proximity.toFixed(2)}<br>`;
+    }
+
+    document.getElementById('qdata').innerHTML = qdataHTML;
+
+    // Camera: slow orbit with gentle vertical movement
+    const camAngle = time * 0.025;
+    camera.position.x = Math.sin(camAngle) * 11;
+    camera.position.z = Math.cos(camAngle) * 11;
+    camera.position.y = Math.sin(time * 0.015) * 4 + 2;
+    camera.lookAt(0, 0, 0);
+  }
+
+  // ─── MAIN LOOP ───
+  let lastTime = 0;
+  function animate(timestamp) {
+    requestAnimationFrame(animate);
+    const dt = Math.min((timestamp - lastTime) / 1000, 0.1);
+    lastTime = timestamp;
+    time += dt;
+
+    if (started) update(dt);
+
+    renderer.render(scene, camera);
+  }
+
+  function start() {
+    if (started) return;
+    started = true;
+    initAudio();
+    document.getElementById('overlay').classList.add('hidden');
+    setTimeout(() => {
+      document.getElementById('info').classList.add('visible');
+      document.getElementById('qdata').classList.add('visible');
+    }, 2500);
+  }
+
+  initScene();
+  requestAnimationFrame(animate);
+  document.getElementById('overlay').addEventListener('click', start);
+  document.addEventListener('keypress', start);
+
+})();
+</script>
+</body>
+</html>

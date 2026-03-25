@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HAMILTON'S BRIDGE — Quaternion Sound Synthesis v3</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#000;overflow:hidden;font-family:'Courier New',monospace;color:#fff}
+canvas{display:block}
+#overlay{position:fixed;top:0;left:0;width:100%;height:100%;display:flex;align-items:center;justify-content:center;z-index:10;background:#000;cursor:pointer;transition:opacity 2s}
+#overlay.hidden{opacity:0;pointer-events:none}
+#overlay-text{text-align:center;letter-spacing:0.2em}
+#overlay-text h1{font-size:14px;font-weight:300;margin-bottom:8px;color:#da8}
+#overlay-text p{font-size:10px;font-weight:300;color:#543;letter-spacing:0.5em}
+#overlay-text .eq{font-size:11px;color:#a86;margin-top:16px;letter-spacing:0.1em}
+#info{position:fixed;bottom:12px;left:12px;font-size:9px;color:#332;letter-spacing:0.2em;z-index:5;opacity:0;transition:opacity 3s}
+#info.visible{opacity:1}
+#algebra{position:fixed;top:12px;left:12px;font-size:9px;color:#3a2a10;letter-spacing:0.1em;z-index:5;opacity:0;transition:opacity 3s;line-height:1.8}
+#algebra.visible{opacity:1}
+#qdata{position:fixed;top:12px;right:12px;font-size:8px;color:#2a2010;letter-spacing:0.1em;z-index:5;text-align:right;opacity:0;transition:opacity 3s;line-height:1.6}
+#qdata.visible{opacity:1}
+</style>
+</head>
+<body>
+<div id="overlay">
+  <div id="overlay-text">
+    <h1>hamilton's bridge</h1>
+    <p>click to begin</p>
+    <div class="eq">i&sup2; = j&sup2; = k&sup2; = ijk = &minus;1</div>
+  </div>
+</div>
+<div id="info">HAMILTON'S BRIDGE — algebraic quaternion synthesis v3</div>
+<div id="algebra"></div>
+<div id="qdata"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function() {
+  'use strict';
+
+  let audioCtx, masterGain, analyser, analyserData;
+  let scene, camera, renderer;
+  let started = false;
+  let time = 0;
+
+  // The three basis quaternions i, j, k — slowly drifting from pure state
+  const qi = new THREE.Quaternion(1, 0, 0, 0); // pure i
+  const qj = new THREE.Quaternion(0, 1, 0, 0); // pure j
+  const qk = new THREE.Quaternion(0, 0, 1, 0); // pure k
+
+  // Drift targets
+  const qiTarget = new THREE.Quaternion();
+  const qjTarget = new THREE.Quaternion();
+  const qkTarget = new THREE.Quaternion();
+  let driftTimer = 0;
+  const DRIFT_INTERVAL = 25;
+
+  // Audio
+  const oscI = {}, oscJ = {}, oscK = {};
+  let productGain;
+
+  // Visual elements
+  let sphere, axisI, axisJ, axisK;
+  const trails = { i: [], j: [], k: [] };
+  const TRAIL_LENGTH = 200;
+  let trailMeshI, trailMeshJ, trailMeshK;
+  const hopfCircles = [];
+
+  // ─── AUDIO ───
+  function initAudio() {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    masterGain = audioCtx.createGain();
+    masterGain.gain.value = 0;
+
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 512;
+    analyserData = new Uint8Array(analyser.frequencyBinCount);
+
+    masterGain.connect(analyser);
+    analyser.connect(audioCtx.destination);
+
+    // Three oscillators for i, j, k — just intonation ratios
+    // C4 (264 Hz), E4 (330 Hz), G4 (396 Hz) — major triad
+    function createVoice(freq) {
+      const osc = audioCtx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      const gain = audioCtx.createGain();
+      gain.gain.value = 0;
+      osc.connect(gain);
+      gain.connect(masterGain);
+      osc.start();
+      return { osc, gain };
+    }
+
+    Object.assign(oscI, createVoice(264));  // C4 — i
+    Object.assign(oscJ, createVoice(330));  // E4 — j
+    Object.assign(oscK, createVoice(396));  // G4 — k
+
+    // Product tone: emerges when i*j=k is "active"
+    const productOsc = audioCtx.createOscillator();
+    productOsc.type = 'sine';
+    productOsc.frequency.value = 528; // C5 — octave above i
+    productGain = audioCtx.createGain();
+    productGain.gain.value = 0;
+    productOsc.connect(productGain);
+    productGain.connect(masterGain);
+    productOsc.start();
+
+    // Sub-harmonic drone
+    const drone = audioCtx.createOscillator();
+    drone.type = 'sine';
+    drone.frequency.value = 66; // C2
+    const droneGain = audioCtx.createGain();
+    droneGain.gain.value = 0.03;
+    drone.connect(droneGain);
+    droneGain.connect(masterGain);
+    drone.start();
+
+    masterGain.gain.linearRampToValueAtTime(0.15, audioCtx.currentTime + 3);
+  }
+
+  // ─── SCENE ───
+  function initScene() {
+    scene = new THREE.Scene();
+    camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 100);
+    camera.position.set(0, 0, 6);
+
+    renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setClearColor(0x020100);
+    document.body.appendChild(renderer.domElement);
+
+    // Unit sphere wireframe
+    const sphereGeo = new THREE.SphereGeometry(2, 32, 32);
+    const sphereMat = new THREE.MeshBasicMaterial({
+      color: 0x332200,
+      wireframe: true,
+      transparent: true,
+      opacity: 0.08
+    });
+    sphere = new THREE.Mesh(sphereGeo, sphereMat);
+    scene.add(sphere);
+
+    // Axes for i, j, k
+    function createAxis(color, dir) {
+      const points = [
+        new THREE.Vector3().copy(dir).multiplyScalar(-2.5),
+        new THREE.Vector3().copy(dir).multiplyScalar(2.5)
+      ];
+      const geo = new THREE.BufferGeometry().setFromPoints(points);
+      const mat = new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.3 });
+      return new THREE.Line(geo, mat);
+    }
+    axisI = createAxis(0xff4444, new THREE.Vector3(1, 0, 0));
+    axisJ = createAxis(0x44ff44, new THREE.Vector3(0, 1, 0));
+    axisK = createAxis(0x4444ff, new THREE.Vector3(0, 0, 1));
+    scene.add(axisI, axisJ, axisK);
+
+    // Trail lines for each basis vector tracing paths on sphere
+    function createTrailLine(color) {
+      const geo = new THREE.BufferGeometry();
+      const positions = new Float32Array(TRAIL_LENGTH * 3);
+      geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      geo.setDrawRange(0, 0);
+      const mat = new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.5 });
+      const line = new THREE.Line(geo, mat);
+      scene.add(line);
+      return line;
+    }
+    trailMeshI = createTrailLine(0xff6633);
+    trailMeshJ = createTrailLine(0x33ff66);
+    trailMeshK = createTrailLine(0x6633ff);
+
+    // Hopf fibration circles — great circles on the sphere
+    for (let i = 0; i < 12; i++) {
+      const angle1 = (i / 12) * Math.PI;
+      const angle2 = (i / 12) * Math.PI * 0.5;
+      const circlePoints = [];
+      for (let j = 0; j <= 64; j++) {
+        const t = (j / 64) * Math.PI * 2;
+        const x = Math.cos(t) * Math.cos(angle1) * 2;
+        const y = Math.sin(t) * 2;
+        const z = Math.cos(t) * Math.sin(angle1) * 2;
+        // Apply second rotation for fibration linking
+        const p = new THREE.Vector3(x, y, z);
+        p.applyAxisAngle(new THREE.Vector3(1, 0, 0), angle2);
+        circlePoints.push(p);
+      }
+      const geo = new THREE.BufferGeometry().setFromPoints(circlePoints);
+      const mat = new THREE.LineBasicMaterial({
+        color: 0x886600,
+        transparent: true,
+        opacity: 0.04
+      });
+      const circle = new THREE.Line(geo, mat);
+      scene.add(circle);
+      hopfCircles.push(circle);
+    }
+
+    // Star field
+    const starGeo = new THREE.BufferGeometry();
+    const starPositions = [];
+    for (let i = 0; i < 500; i++) {
+      starPositions.push(
+        (Math.random() - 0.5) * 50,
+        (Math.random() - 0.5) * 50,
+        (Math.random() - 0.5) * 50
+      );
+    }
+    starGeo.setAttribute('position', new THREE.Float32BufferAttribute(starPositions, 3));
+    const starMat = new THREE.PointsMaterial({ color: 0x443300, size: 0.05, transparent: true, opacity: 0.3 });
+    scene.add(new THREE.Points(starGeo, starMat));
+
+    window.addEventListener('resize', onResize);
+  }
+
+  function onResize() {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  }
+
+  // ─── QUATERNION LOGIC ───
+  function generateDriftTargets() {
+    // Slightly perturb the basis quaternions — they drift from pure state
+    function perturbBasis(pure) {
+      const axis = new THREE.Vector3(
+        Math.random() * 2 - 1,
+        Math.random() * 2 - 1,
+        Math.random() * 2 - 1
+      ).normalize();
+      const perturbQ = new THREE.Quaternion().setFromAxisAngle(axis, Math.random() * 0.6);
+      return new THREE.Quaternion().copy(pure).multiply(perturbQ).normalize();
+    }
+    qiTarget.copy(perturbBasis(new THREE.Quaternion(1, 0, 0, 0)));
+    qjTarget.copy(perturbBasis(new THREE.Quaternion(0, 1, 0, 0)));
+    qkTarget.copy(perturbBasis(new THREE.Quaternion(0, 0, 1, 0)));
+  }
+
+  function updateQuaternions(dt) {
+    driftTimer += dt;
+    if (driftTimer > DRIFT_INTERVAL) {
+      driftTimer = 0;
+      generateDriftTargets();
+    }
+
+    qi.slerp(qiTarget, 0.002);
+    qj.slerp(qjTarget, 0.002);
+    qk.slerp(qkTarget, 0.002);
+  }
+
+  // Quaternion product
+  function qMul(a, b) {
+    return new THREE.Quaternion(
+      a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+      a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+      a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+      a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z
+    );
+  }
+
+  // ─── AUDIO UPDATE ───
+  function updateAudio(dt) {
+    const t = audioCtx.currentTime;
+
+    // Map quaternion components to frequency deviations
+    // i oscillator: base 264 Hz, modulated by qi's deviation from pure i
+    const iDev = 1 - Math.abs(qi.x); // 0 when pure i, up to 1 when rotated away
+    const jDev = 1 - Math.abs(qj.y);
+    const kDev = 1 - Math.abs(qk.z);
+
+    oscI.osc.frequency.exponentialRampToValueAtTime(264 * (1 + iDev * 0.3), t + 0.3);
+    oscJ.osc.frequency.exponentialRampToValueAtTime(330 * (1 + jDev * 0.3), t + 0.3);
+    oscK.osc.frequency.exponentialRampToValueAtTime(396 * (1 + kDev * 0.3), t + 0.3);
+
+    // Amplitude: louder when closer to pure basis state
+    oscI.gain.gain.linearRampToValueAtTime(0.06 * (1 - iDev * 0.7), t + 0.2);
+    oscJ.gain.gain.linearRampToValueAtTime(0.05 * (1 - jDev * 0.7), t + 0.2);
+    oscK.gain.gain.linearRampToValueAtTime(0.04 * (1 - kDev * 0.7), t + 0.2);
+
+    // Product check: i*j should equal k
+    // Compute qi*qj and measure how close it is to qk
+    const ijProduct = qMul(qi, qj);
+    const productCloseness = 1 - ijProduct.angleTo(qk) / Math.PI;
+
+    // Product tone amplitude: louder when i*j ≈ k
+    productGain.gain.linearRampToValueAtTime(productCloseness * 0.05, t + 0.3);
+
+    // Also check: i²=-1 (qi*qi should have w≈-1, x≈y≈z≈0)
+    const iSquared = qMul(qi, qi);
+    const iSqCloseness = Math.abs(iSquared.w + 1) < 0.3 ? 1 : 0; // close to -1?
+    // When i²≈-1, briefly drop i oscillator an octave
+    if (iSqCloseness > 0.5) {
+      oscI.osc.frequency.exponentialRampToValueAtTime(132, t + 0.1);
+    }
+  }
+
+  // ─── VISUAL UPDATE ───
+  function updateVisuals(dt) {
+    analyser.getByteFrequencyData(analyserData);
+    let avg = 0;
+    for (let i = 0; i < analyserData.length; i++) avg += analyserData[i];
+    avg /= analyserData.length * 255;
+
+    // Map quaternion basis vectors to points on sphere surface
+    // The "tip" of each basis quaternion's imaginary part, projected onto S²
+    const pI = new THREE.Vector3(qi.x, qi.y, qi.z).normalize().multiplyScalar(2);
+    const pJ = new THREE.Vector3(qj.x, qj.y, qj.z).normalize().multiplyScalar(2);
+    const pK = new THREE.Vector3(qk.x, qk.y, qk.z).normalize().multiplyScalar(2);
+
+    // Update trails
+    trails.i.push(pI.clone());
+    trails.j.push(pJ.clone());
+    trails.k.push(pK.clone());
+    if (trails.i.length > TRAIL_LENGTH) trails.i.shift();
+    if (trails.j.length > TRAIL_LENGTH) trails.j.shift();
+    if (trails.k.length > TRAIL_LENGTH) trails.k.shift();
+
+    function updateTrail(mesh, points) {
+      const positions = mesh.geometry.attributes.position.array;
+      for (let i = 0; i < points.length; i++) {
+        positions[i * 3] = points[i].x;
+        positions[i * 3 + 1] = points[i].y;
+        positions[i * 3 + 2] = points[i].z;
+      }
+      mesh.geometry.attributes.position.needsUpdate = true;
+      mesh.geometry.setDrawRange(0, points.length);
+    }
+    updateTrail(trailMeshI, trails.i);
+    updateTrail(trailMeshJ, trails.j);
+    updateTrail(trailMeshK, trails.k);
+
+    // Hopf circles pulse with audio
+    hopfCircles.forEach((c, i) => {
+      c.material.opacity = 0.03 + avg * 0.08;
+      c.rotation.y += dt * 0.01 * (i + 1) * 0.1;
+    });
+
+    // Sphere opacity breathes
+    sphere.material.opacity = 0.05 + avg * 0.08;
+
+    // Camera orbit
+    const camAngle = time * 0.02;
+    camera.position.x = Math.sin(camAngle) * 5.5;
+    camera.position.z = Math.cos(camAngle) * 5.5;
+    camera.position.y = Math.sin(time * 0.012) * 2;
+    camera.lookAt(0, 0, 0);
+
+    // Algebra display
+    const ijProduct = qMul(qi, qj);
+    const iSquared = qMul(qi, qi);
+    const productCloseness = 1 - ijProduct.angleTo(qk) / Math.PI;
+
+    document.getElementById('algebra').innerHTML =
+      `i = (${qi.x.toFixed(2)}, ${qi.y.toFixed(2)}, ${qi.z.toFixed(2)}, ${qi.w.toFixed(2)})<br>` +
+      `j = (${qj.x.toFixed(2)}, ${qj.y.toFixed(2)}, ${qj.z.toFixed(2)}, ${qj.w.toFixed(2)})<br>` +
+      `k = (${qk.x.toFixed(2)}, ${qk.y.toFixed(2)}, ${qk.z.toFixed(2)}, ${qk.w.toFixed(2)})<br>` +
+      `<br>i*j ≈ k : ${(productCloseness * 100).toFixed(1)}%<br>` +
+      `i&sup2; ≈ -1 : w=${iSquared.w.toFixed(3)}`;
+
+    document.getElementById('qdata').innerHTML =
+      `i*j = (${ijProduct.x.toFixed(3)}, ${ijProduct.y.toFixed(3)}, ${ijProduct.z.toFixed(3)}, ${ijProduct.w.toFixed(3)})`;
+  }
+
+  // ─── MAIN LOOP ───
+  let lastTime = 0;
+  function animate(timestamp) {
+    requestAnimationFrame(animate);
+    const dt = Math.min((timestamp - lastTime) / 1000, 0.1);
+    lastTime = timestamp;
+    time += dt;
+
+    if (started) {
+      updateQuaternions(dt);
+      updateAudio(dt);
+      updateVisuals(dt);
+    }
+
+    renderer.render(scene, camera);
+  }
+
+  function start() {
+    if (started) return;
+    started = true;
+    initAudio();
+    generateDriftTargets();
+    document.getElementById('overlay').classList.add('hidden');
+    setTimeout(() => {
+      document.getElementById('info').classList.add('visible');
+      document.getElementById('algebra').classList.add('visible');
+      document.getElementById('qdata').classList.add('visible');
+    }, 2500);
+  }
+
+  initScene();
+  requestAnimationFrame(animate);
+  document.getElementById('overlay').addEventListener('click', start);
+  document.addEventListener('keypress', start);
+
+})();
+</script>
+</body>
+</html>
