@@ -6,17 +6,24 @@ This file provides guidance for AI assistants working with the **Experiment** re
 
 - **Owner**: so0374jfow
 - **Name**: Experiment
-- **Status**: New/empty repository — this is the initial scaffold
+- **Status**: Quaternion Sound Synthesis — generative audio-visual art
 
 ## Project Structure
 
 ```
 Experiment/
-├── CLAUDE.md          # AI assistant guidance (this file)
-└── (new files go here)
+├── CLAUDE.md                      # AI assistant guidance (this file)
+├── index.html                     # Landing page linking all 5 versions
+├── v1-quat-field/index.html       # Minimal microsound (after Alva Noto)
+├── v2-eigenspace/index.html       # Psychoacoustic FM (after Florian Hecker)
+├── v3-hamiltons-bridge/index.html # Algebraic purity (after Hamilton)
+├── v4-rotorsound/index.html       # Polyrhythmic kinetic (after Zimoun/Ikeda)
+└── v5-manifold/index.html         # Ambient drone (after Éliane Radigue)
 ```
 
-As the project grows, update this section to reflect the directory layout.
+Each version is a self-contained HTML file with inline CSS and JS.
+Dependencies: Three.js r128 via CDN, Web Audio API (native browser).
+No build step required — deployable directly to GitHub Pages.
 
 ## Development Workflow
 
@@ -54,10 +61,13 @@ As the project grows, update this section to reflect the directory layout.
 _(Update this section as build tools, test frameworks, and scripts are added.)_
 
 ```bash
-# Example placeholders — replace with actual commands as the project evolves
-# npm install       # Install dependencies
-# npm test          # Run tests
-# npm run build     # Build the project
+# No build step required — open any index.html in a browser
+# For local development:
+# python3 -m http.server 8000    # Serve from project root
+# open http://localhost:8000      # View landing page
+
+# Git tags for each version:
+# v1-quat-field, v2-eigenspace, v3-hamiltons-bridge, v4-rotorsound, v5-manifold
 ```
 
 ## Notes for AI Assistants
