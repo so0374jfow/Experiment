@@ -6,16 +6,16 @@
 <title>QUAT.FIELD — Quaternion Sound Synthesis v1</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{background:#000;overflow:hidden;font-family:'Courier New',monospace;color:#fff}
+body{background:#000;overflow:hidden;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;color:#fff}
 canvas{display:block}
 #overlay{position:fixed;top:0;left:0;width:100%;height:100%;display:flex;align-items:center;justify-content:center;z-index:10;background:#000;cursor:pointer;transition:opacity 1.5s}
 #overlay.hidden{opacity:0;pointer-events:none}
 #overlay-text{text-align:center;letter-spacing:0.3em;text-transform:uppercase}
-#overlay-text h1{font-size:14px;font-weight:300;margin-bottom:8px;color:#8af}
-#overlay-text p{font-size:10px;font-weight:300;color:#446;letter-spacing:0.5em}
-#info{position:fixed;bottom:12px;left:12px;font-size:9px;color:#223;letter-spacing:0.2em;z-index:5;opacity:0;transition:opacity 3s}
+#overlay-text h1{font-size:14px;font-weight:300;margin-bottom:8px;color:#fff}
+#overlay-text p{font-size:10px;font-weight:300;color:#555;letter-spacing:0.5em}
+#info{position:fixed;bottom:12px;left:12px;font-size:9px;color:#333;letter-spacing:0.2em;z-index:5;opacity:0;transition:opacity 3s}
 #info.visible{opacity:1}
-#qdata{position:fixed;top:12px;right:12px;font-size:9px;color:#1a2a3a;letter-spacing:0.1em;z-index:5;text-align:right;opacity:0;transition:opacity 3s}
+#qdata{position:fixed;top:12px;right:12px;font-size:9px;color:#333;letter-spacing:0.1em;z-index:5;text-align:right;opacity:0;transition:opacity 3s}
 #qdata.visible{opacity:1}
 </style>
 </head>
@@ -138,7 +138,7 @@ canvas{display:block}
     const pointsGeo = new THREE.BufferGeometry();
     pointsGeo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
     const pointsMat = new THREE.PointsMaterial({
-      color: 0x88aaff,
+      color: 0xffffff,
       size: 0.04,
       sizeAttenuation: true,
       transparent: true,
@@ -164,7 +164,7 @@ canvas{display:block}
     const linesGeo = new THREE.BufferGeometry();
     linesGeo.setAttribute('position', new THREE.Float32BufferAttribute(linePositions, 3));
     const linesMat = new THREE.LineBasicMaterial({
-      color: 0x223344,
+      color: 0x333333,
       transparent: true,
       opacity: 0.15
     });
@@ -279,7 +279,7 @@ canvas{display:block}
       linesMesh.material.color.setHex(0xffffff);
       setTimeout(() => {
         linesMesh.material.opacity = 0.1;
-        linesMesh.material.color.setHex(0x223344);
+        linesMesh.material.color.setHex(0x333333);
       }, 50);
     }
 

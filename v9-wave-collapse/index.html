@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WAVE.COLLAPSE — Quaternion Sound Synthesis v9</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#000;overflow:hidden;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;color:#fff;touch-action:none}
+canvas{display:block}
+#overlay{position:fixed;top:0;left:0;width:100%;height:100%;display:flex;align-items:center;justify-content:center;z-index:20;background:#000;cursor:pointer}
+#overlay.hidden{opacity:0;pointer-events:none;transition:opacity 1s}
+#overlay-text{text-align:center;letter-spacing:0.3em;text-transform:uppercase}
+#overlay-text h1{font-size:16px;font-weight:300;margin-bottom:10px;color:#fff}
+#overlay-text p{font-size:10px;font-weight:300;color:#888;letter-spacing:0.5em}
+#info-btn{position:fixed;top:16px;left:16px;width:32px;height:32px;border-radius:50%;border:1px solid #555;background:transparent;color:#888;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:14px;font-style:italic;cursor:pointer;z-index:15;display:flex;align-items:center;justify-content:center;transition:border-color 0.3s,color 0.3s}
+#info-btn:hover{border-color:#fff;color:#fff}
+#info-panel{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.88);z-index:14;display:none;align-items:center;justify-content:center;padding:40px}
+#info-panel.visible{display:flex}
+#info-content{max-width:520px;font-size:13px;line-height:1.7;color:#ccc;font-weight:300;letter-spacing:0.02em}
+#info-content h2{font-size:12px;font-weight:400;letter-spacing:0.3em;text-transform:uppercase;color:#fff;margin-bottom:16px}
+#title-bar{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);font-size:9px;letter-spacing:0.4em;text-transform:uppercase;color:#333;z-index:5}
+</style>
+</head>
+<body>
+<div id="overlay">
+  <div id="overlay-text">
+    <h1>wave.collapse</h1>
+    <p>click to begin</p>
+  </div>
+</div>
+<button id="info-btn">i</button>
+<div id="info-panel">
+  <div id="info-content">
+    <h2>Wave.Collapse</h2>
+    Each click spawns a circular wave with a random quaternion identity. As waves expand and overlap, their quaternions are multiplied together — and because quaternion multiplication is non-commutative (q1×q2 ≠ q2×q1), the order of overlap matters. The product quaternion's components modulate FM synthesis parameters: the w component sets the carrier frequency (110–880 Hz), x sets the modulation ratio, and y×z sets the modulation depth. Where many waves intersect, the cascading quaternion products create complex, evolving timbres.
+  </div>
+</div>
+<div id="title-bar">wave.collapse — v9</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function(){
+  'use strict';
+
+  let audioCtx, masterGain;
+  let scene, camera, renderer;
+  let started = false;
+  let time = 0;
+  const MAX_WAVES = 12;
+  const WAVE_LIFETIME = 8;
+  const waves = [];
+  let stutterBus; // shared bus for stutter overlap intensity
+
+  // Quaternion helpers
+  function randomQuat(){
+    const u1 = Math.random(), u2 = Math.random()*Math.PI*2, u3 = Math.random()*Math.PI*2;
+    const s1 = Math.sqrt(1-u1), s2 = Math.sqrt(u1);
+    return new THREE.Quaternion(s1*Math.sin(u2), s1*Math.cos(u2), s2*Math.sin(u3), s2*Math.cos(u3));
+  }
+
+  function quatMultiply(a, b){
+    return new THREE.Quaternion(
+      a.w*b.x + a.x*b.w + a.y*b.z - a.z*b.y,
+      a.w*b.y - a.x*b.z + a.y*b.w + a.z*b.x,
+      a.w*b.z + a.x*b.y - a.y*b.x + a.z*b.w,
+      a.w*b.w - a.x*b.x - a.y*b.y - a.z*b.z
+    );
+  }
+
+  // Wave class
+  class Wave {
+    constructor(x, y){
+      this.x = x;
+      this.y = y;
+      this.birth = time;
+      this.quat = randomQuat();
+      this.radius = 0;
+      this.alive = true;
+      this.stutterIntensity = 0.01;
+
+      // Visual: ring geometry
+      this.rings = [];
+      for(let i = 0; i < 3; i++){
+        const geom = new THREE.RingGeometry(0.01, 0.02, 64);
+        const mat = new THREE.MeshBasicMaterial({color: 0xffffff, transparent: true, opacity: 0.7, side: THREE.DoubleSide});
+        const mesh = new THREE.Mesh(geom, mat);
+        mesh.position.set(x, y, 0);
+        scene.add(mesh);
+        this.rings.push({mesh, mat, offset: i * 0.15});
+      }
+
+      // Audio: FM oscillator
+      this.carrier = audioCtx.createOscillator();
+      this.modulator = audioCtx.createOscillator();
+      this.modGain = audioCtx.createGain();
+      this.envGain = audioCtx.createGain();
+
+      const carrierFreq = 110 + Math.abs(this.quat.w) * 770;
+      const modRatio = 1 + Math.abs(this.quat.x) * 7;
+      const modDepth = Math.abs(this.quat.y * this.quat.z) * 400;
+
+      this.carrier.frequency.value = carrierFreq;
+      this.modulator.frequency.value = carrierFreq * modRatio;
+      this.modGain.gain.value = modDepth;
+      this.envGain.gain.value = 0;
+
+      this.modulator.connect(this.modGain);
+      this.modGain.connect(this.carrier.frequency);
+      this.carrier.connect(this.envGain);
+      this.envGain.connect(masterGain);
+
+      this.carrier.start();
+      this.modulator.start();
+
+      // Fade in
+      this.envGain.gain.setTargetAtTime(0.12, audioCtx.currentTime, 0.1);
+
+      // Stutter bank: 4 high-pitch sines gated by square-wave LFO, brief burst on spawn
+      this.stutterOscs = [];
+      this.stutterGains = [];
+      this.stutterLFO = audioCtx.createOscillator();
+      this.stutterLFO.type = 'square';
+      this.stutterLFO.frequency.value = 15 + Math.random() * 20;
+      this.stutterLFOGain = audioCtx.createGain();
+      this.stutterLFOGain.gain.value = 0;
+      this.stutterLFO.connect(this.stutterLFOGain);
+      this.stutterLFO.start();
+
+      const stuttFreqs = [3100, 4800, 6200, 7600];
+      stuttFreqs.forEach(f => {
+        const o = audioCtx.createOscillator();
+        o.type = 'sine';
+        o.frequency.value = f + (Math.random() - 0.5) * 400;
+        const g = audioCtx.createGain();
+        g.gain.value = 0;
+        o.connect(g);
+        this.stutterLFOGain.connect(g.gain);
+        g.connect(masterGain);
+        o.start();
+        this.stutterOscs.push(o);
+        this.stutterGains.push(g);
+      });
+
+      // Spawn burst: brief high stutter
+      const t0 = audioCtx.currentTime;
+      this.stutterLFOGain.gain.setTargetAtTime(0.04, t0, 0.01);
+      this.stutterLFOGain.gain.setTargetAtTime(0.01, t0 + 0.15, 0.12);
+    }
+
+    update(dt){
+      const age = time - this.birth;
+      if(age > WAVE_LIFETIME){
+        this.dispose();
+        return;
+      }
+
+      this.radius = age * 1.2;
+      const fade = 1 - age / WAVE_LIFETIME;
+      const fadeEased = fade * fade;
+
+      for(let i = 0; i < this.rings.length; i++){
+        const r = this.radius - this.rings[i].offset;
+        if(r < 0) { this.rings[i].mesh.visible = false; continue; }
+        this.rings[i].mesh.visible = true;
+        const innerR = Math.max(0.01, r - 0.02);
+        // Scale the ring
+        this.rings[i].mesh.scale.set(r * 50, r * 50, 1);
+        this.rings[i].mat.opacity = fadeEased * 0.6;
+      }
+
+      // Audio fade
+      if(this.envGain){
+        const vol = fadeEased * 0.12;
+        this.envGain.gain.setTargetAtTime(vol, audioCtx.currentTime, 0.05);
+      }
+
+      // Stutter fades with wave
+      if(this.stutterLFOGain){
+        this.stutterLFOGain.gain.setTargetAtTime(this.stutterIntensity * fadeEased, audioCtx.currentTime, 0.05);
+      }
+    }
+
+    setStutterOverlap(overlapCount){
+      // More overlaps = denser stutter texture
+      this.stutterIntensity = Math.min(0.01 + overlapCount * 0.01, 0.05);
+      if(this.stutterLFO){
+        const rate = 10 + overlapCount * 6;
+        this.stutterLFO.frequency.setTargetAtTime(Math.min(rate, 40), audioCtx.currentTime, 0.05);
+      }
+    }
+
+    applyInterference(productQuat){
+      if(!this.carrier) return;
+      const carrierFreq = 110 + Math.abs(productQuat.w) * 770;
+      const modRatio = 1 + Math.abs(productQuat.x) * 7;
+      const modDepth = Math.abs(productQuat.y * productQuat.z) * 400;
+      this.carrier.frequency.setTargetAtTime(carrierFreq, audioCtx.currentTime, 0.1);
+      this.modulator.frequency.setTargetAtTime(carrierFreq * modRatio, audioCtx.currentTime, 0.1);
+      this.modGain.gain.setTargetAtTime(modDepth, audioCtx.currentTime, 0.1);
+    }
+
+    dispose(){
+      this.alive = false;
+      for(const ring of this.rings){
+        scene.remove(ring.mesh);
+        ring.mesh.geometry.dispose();
+        ring.mat.dispose();
+      }
+      if(this.envGain){
+        this.envGain.gain.setTargetAtTime(0, audioCtx.currentTime, 0.05);
+        if(this.stutterLFOGain) this.stutterLFOGain.gain.setTargetAtTime(0, audioCtx.currentTime, 0.05);
+        setTimeout(() => {
+          try{ this.carrier.stop(); this.modulator.stop(); }catch(e){}
+          try{ this.stutterLFO.stop(); this.stutterOscs.forEach(o => o.stop()); }catch(e){}
+        }, 200);
+      }
+    }
+  }
+
+  function initAudio(){
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    masterGain = audioCtx.createGain();
+    masterGain.gain.value = 0.3;
+
+    const compressor = audioCtx.createDynamicsCompressor();
+    compressor.threshold.value = -20;
+    compressor.ratio.value = 6;
+    masterGain.connect(compressor);
+    compressor.connect(audioCtx.destination);
+  }
+
+  function initScene(){
+    scene = new THREE.Scene();
+    camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10);
+    camera.position.z = 1;
+
+    renderer = new THREE.WebGLRenderer({antialias: true, alpha: false});
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setClearColor(0x000000);
+    document.body.appendChild(renderer.domElement);
+
+    updateCamera();
+  }
+
+  function updateCamera(){
+    const aspect = window.innerWidth / window.innerHeight;
+    const h = 5;
+    camera.left = -h * aspect;
+    camera.right = h * aspect;
+    camera.top = h;
+    camera.bottom = -h;
+    camera.updateProjectionMatrix();
+  }
+
+  function screenToWorld(clientX, clientY){
+    const nx = (clientX / window.innerWidth) * 2 - 1;
+    const ny = -(clientY / window.innerHeight) * 2 + 1;
+    const aspect = window.innerWidth / window.innerHeight;
+    const h = 5;
+    return { x: nx * h * aspect, y: ny * h };
+  }
+
+  function spawnWave(clientX, clientY){
+    if(waves.length >= MAX_WAVES){
+      // Remove oldest
+      const oldest = waves.shift();
+      oldest.dispose();
+    }
+    const pos = screenToWorld(clientX, clientY);
+    waves.push(new Wave(pos.x, pos.y));
+  }
+
+  function computeInterference(){
+    // For each pair of waves that overlap, multiply quaternions
+    for(let i = 0; i < waves.length; i++){
+      if(!waves[i].alive) continue;
+      let productQuat = waves[i].quat.clone();
+      let hasOverlap = false;
+      let overlapCount = 0;
+
+      for(let j = 0; j < waves.length; j++){
+        if(i === j || !waves[j].alive) continue;
+        const dx = waves[i].x - waves[j].x;
+        const dy = waves[i].y - waves[j].y;
+        const dist = Math.sqrt(dx*dx + dy*dy);
+        // Overlap if distance < sum of radii
+        if(dist < waves[i].radius + waves[j].radius){
+          productQuat = quatMultiply(productQuat, waves[j].quat);
+          productQuat.normalize();
+          hasOverlap = true;
+          overlapCount++;
+
+          // Brighten rings at intersection
+          const age_j = time - waves[j].birth;
+          const fade_j = 1 - age_j / WAVE_LIFETIME;
+          for(const ring of waves[j].rings){
+            if(ring.mat.opacity < 0.9) ring.mat.opacity = Math.min(1, ring.mat.opacity + 0.1 * fade_j);
+          }
+        }
+      }
+
+      waves[i].setStutterOverlap(overlapCount);
+      if(hasOverlap){
+        waves[i].applyInterference(productQuat);
+      }
+    }
+  }
+
+  function animate(){
+    requestAnimationFrame(animate);
+    const dt = 1/60;
+    time += dt;
+
+    // Update waves
+    for(let i = waves.length - 1; i >= 0; i--){
+      waves[i].update(dt);
+      if(!waves[i].alive){
+        waves.splice(i, 1);
+      }
+    }
+
+    computeInterference();
+
+    renderer.render(scene, camera);
+  }
+
+  function begin(){
+    if(started) return;
+    started = true;
+    document.getElementById('overlay').classList.add('hidden');
+    initAudio();
+    initScene();
+    animate();
+  }
+
+  // Events
+  document.getElementById('overlay').addEventListener('pointerdown', function(e){
+    e.preventDefault();
+    begin();
+  });
+
+  document.body.addEventListener('pointerdown', function(e){
+    if(!started) return;
+    if(e.target.id === 'info-btn' || document.getElementById('info-panel').contains(e.target)) return;
+    spawnWave(e.clientX, e.clientY);
+  });
+
+  document.getElementById('info-btn').addEventListener('pointerdown', function(e){
+    e.stopPropagation();
+    document.getElementById('info-panel').classList.toggle('visible');
+  });
+
+  document.getElementById('info-panel').addEventListener('pointerdown', function(e){
+    e.stopPropagation();
+    document.getElementById('info-panel').classList.remove('visible');
+  });
+
+  window.addEventListener('resize', function(){
+    if(!renderer) return;
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    updateCamera();
+  });
+})();
+</script>
+</body>
+</html>

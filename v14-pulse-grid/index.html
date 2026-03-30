@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PULSE.GRID — Quaternion Step Sequencer v14</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#000;overflow:hidden;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;color:#fff;touch-action:none}
+canvas{display:block}
+#overlay{position:fixed;top:0;left:0;width:100%;height:100%;display:flex;align-items:center;justify-content:center;z-index:20;background:#000;cursor:pointer}
+#overlay.hidden{opacity:0;pointer-events:none;transition:opacity 0.8s}
+#overlay-text{text-align:center}
+#overlay-text h1{font-size:18px;font-weight:300;letter-spacing:0.4em;text-transform:uppercase;margin-bottom:10px}
+#overlay-text p{font-size:11px;font-weight:300;color:#888;letter-spacing:0.3em}
+#info-btn{position:fixed;top:16px;left:16px;width:32px;height:32px;border-radius:50%;border:1px solid #555;background:transparent;color:#888;font-size:14px;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;cursor:pointer;z-index:15;display:flex;align-items:center;justify-content:center;transition:border-color 0.3s,color 0.3s}
+#info-btn:hover{border-color:#fff;color:#fff}
+#info-panel{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.92);z-index:14;display:none;align-items:center;justify-content:center;padding:40px}
+#info-panel.visible{display:flex}
+#info-content{max-width:560px;font-size:13px;line-height:1.8;color:#ccc;font-weight:300;letter-spacing:0.02em}
+#info-content h2{font-size:15px;font-weight:400;letter-spacing:0.3em;text-transform:uppercase;color:#fff;margin-bottom:16px}
+#title-bar{position:fixed;top:16px;left:60px;font-size:10px;letter-spacing:0.3em;text-transform:uppercase;color:#333;z-index:10}
+#stats{position:fixed;bottom:16px;right:16px;font-size:9px;letter-spacing:0.15em;color:#333;z-index:10;text-align:right}
+#controls{position:fixed;bottom:16px;left:16px;font-size:9px;letter-spacing:0.15em;color:#555;z-index:10}
+</style>
+</head>
+<body>
+<div id="overlay">
+  <div id="overlay-text">
+    <h1>pulse.grid</h1>
+    <p>click to begin</p>
+  </div>
+</div>
+<button id="info-btn">i</button>
+<div id="info-panel">
+  <div id="info-content">
+    <h2>pulse.grid</h2>
+    This is a quaternion step sequencer. Each cell's position (row, column) maps to a quaternion via: q = (cos(row&times;&pi;/16), sin(row&times;&pi;/16), cos(col&times;&pi;/16), sin(col&times;&pi;/16)), normalized to unit length. The quaternion's w component determines the pitch (rows map to an 8-note scale from C3 to C5), while the imaginary magnitude |xi+yj+zk| determines the note's duration and attack. The sequencer plays left-to-right, with each column triggering simultaneously. Active cells produce triangle-wave tones with the quaternion-derived pitch and envelope.
+  </div>
+</div>
+<div id="title-bar">PULSE.GRID — quaternion step sequencer</div>
+<div id="stats"></div>
+<div id="controls">BPM: 120 &middot; click cells to toggle</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function(){
+  'use strict';
+
+  var audioCtx, masterGain;
+  var started = false;
+  var canvas, ctx;
+  var WIDTH, HEIGHT;
+  var ROWS = 8, COLS = 8;
+  var grid = [];
+  var currentCol = 0;
+  var beatInterval = 60 / 120 / 2;
+  var lastBeatTime = 0;
+  var cellSize = 0;
+  var gridOffsetX = 0, gridOffsetY = 0;
+  var flashCells = [];
+
+  var noteFreqs = [130.81, 164.81, 196.00, 246.94, 293.66, 349.23, 440.00, 523.25];
+
+  // ─── STUTTER OSCILLATOR BANK ───
+  var stutterOscs = [];
+  var stutterGains = [];
+  var stutterLFO = null;
+  var stutterLFOGain = null;
+  var stutterMaster = null;
+  var stutterFreqs = [3200, 4500, 5800, 6900, 7600];
+
+  function cellQuaternion(row, col) {
+    var w = Math.cos(row * Math.PI / 16);
+    var x = Math.sin(row * Math.PI / 16);
+    var y = Math.cos(col * Math.PI / 16);
+    var z = Math.sin(col * Math.PI / 16);
+    var len = Math.sqrt(w*w + x*x + y*y + z*z);
+    return { w: w/len, x: x/len, y: y/len, z: z/len };
+  }
+
+  function imagMagnitude(q) {
+    return Math.sqrt(q.x*q.x + q.y*q.y + q.z*q.z);
+  }
+
+  function initAudio() {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    masterGain = audioCtx.createGain();
+    masterGain.gain.value = 0.3;
+    masterGain.connect(audioCtx.destination);
+
+    // Stutter bank: 5 sine oscillators gated by a square-wave LFO
+    stutterMaster = audioCtx.createGain();
+    stutterMaster.gain.value = 0;
+    stutterMaster.connect(audioCtx.destination);
+
+    stutterLFOGain = audioCtx.createGain();
+    stutterLFOGain.gain.value = 0;
+    stutterLFOGain.connect(stutterMaster.gain);
+
+    stutterLFO = audioCtx.createOscillator();
+    stutterLFO.type = 'square';
+    stutterLFO.frequency.value = 16;
+    stutterLFO.connect(stutterLFOGain);
+    stutterLFO.start();
+
+    for (var si = 0; si < stutterFreqs.length; si++) {
+      var sOsc = audioCtx.createOscillator();
+      sOsc.type = 'sine';
+      sOsc.frequency.value = stutterFreqs[si];
+      var sGain = audioCtx.createGain();
+      sGain.gain.value = 0;
+      sOsc.connect(sGain);
+      sGain.connect(stutterMaster);
+      sOsc.start();
+      stutterOscs.push(sOsc);
+      stutterGains.push(sGain);
+    }
+  }
+
+  function playCell(row, col) {
+    var q = cellQuaternion(row, col);
+    var freq = noteFreqs[row];
+    var imag = imagMagnitude(q);
+    var duration = 0.08 + imag * 0.3;
+    var attack = 0.005 + (1 - imag) * 0.02;
+
+    var now = audioCtx.currentTime;
+    var osc = audioCtx.createOscillator();
+    osc.type = 'triangle';
+    osc.frequency.value = freq;
+
+    var gain = audioCtx.createGain();
+    gain.gain.setValueAtTime(0, now);
+    gain.gain.linearRampToValueAtTime(0.12, now + attack);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + duration);
+
+    osc.connect(gain);
+    gain.connect(masterGain);
+    osc.start(now);
+    osc.stop(now + duration + 0.01);
+
+    osc.onended = function() { osc.disconnect(); gain.disconnect(); };
+
+    flashCells.push({ row: row, col: col, life: 1.0 });
+  }
+
+  function triggerStutter(activeCellCount) {
+    if (!audioCtx || !stutterMaster || activeCellCount === 0) return;
+    var now = audioCtx.currentTime;
+    // Density: more active cells = more oscillators active + higher LFO rate
+    var density = activeCellCount / ROWS; // 0..1
+    var lfoRate = 8 + density * 32; // 8-40 Hz
+    var burstDuration = beatInterval * 0.6;
+    var perOscGain = 0.02 + density * 0.03; // 0.02-0.05
+
+    stutterLFO.frequency.setTargetAtTime(lfoRate, now, 0.005);
+
+    // Activate oscillators proportional to density (at least 1, up to 5)
+    var oscCount = Math.max(1, Math.min(stutterFreqs.length, Math.ceil(density * stutterFreqs.length)));
+    for (var i = 0; i < stutterFreqs.length; i++) {
+      if (i < oscCount) {
+        stutterGains[i].gain.setTargetAtTime(perOscGain, now, 0.003);
+        stutterGains[i].gain.setTargetAtTime(0, now + burstDuration, 0.01);
+      } else {
+        stutterGains[i].gain.setTargetAtTime(0, now, 0.003);
+      }
+    }
+
+    // Gate via LFO: ramp stutterMaster up then down
+    stutterLFOGain.gain.setValueAtTime(1, now);
+    stutterLFOGain.gain.setValueAtTime(1, now + burstDuration);
+    stutterLFOGain.gain.linearRampToValueAtTime(0, now + burstDuration + 0.02);
+  }
+
+  function initCanvas() {
+    canvas = document.createElement('canvas');
+    canvas.style.display = 'block';
+    document.body.appendChild(canvas);
+    ctx = canvas.getContext('2d');
+    resize();
+  }
+
+  function resize() {
+    WIDTH = window.innerWidth;
+    HEIGHT = window.innerHeight;
+    canvas.width = WIDTH;
+    canvas.height = HEIGHT;
+
+    var maxGridSize = Math.min(WIDTH, HEIGHT) * 0.7;
+    cellSize = maxGridSize / COLS;
+    var gridWidth = cellSize * COLS;
+    var gridHeight = cellSize * ROWS;
+    gridOffsetX = (WIDTH - gridWidth) / 2;
+    gridOffsetY = (HEIGHT - gridHeight) / 2;
+  }
+
+  function getCellAt(px, py) {
+    var col = Math.floor((px - gridOffsetX) / cellSize);
+    var row = Math.floor((py - gridOffsetY) / cellSize);
+    if (row >= 0 && row < ROWS && col >= 0 && col < COLS) {
+      return { row: row, col: col };
+    }
+    return null;
+  }
+
+  function draw() {
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+    var radius = cellSize * 0.35;
+
+    for (var r = 0; r < ROWS; r++) {
+      for (var c = 0; c < COLS; c++) {
+        var cx = gridOffsetX + c * cellSize + cellSize / 2;
+        var cy = gridOffsetY + r * cellSize + cellSize / 2;
+        var active = grid[r][c];
+
+        var flash = 0;
+        for (var f = 0; f < flashCells.length; f++) {
+          if (flashCells[f].row === r && flashCells[f].col === c) {
+            flash = flashCells[f].life;
+          }
+        }
+
+        ctx.beginPath();
+        ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+
+        if (active) {
+          if (c === currentCol) {
+            ctx.fillStyle = '#fff';
+          } else {
+            var bright = Math.floor(180 + flash * 75);
+            ctx.fillStyle = 'rgb(' + bright + ',' + bright + ',' + bright + ')';
+          }
+          ctx.fill();
+        } else {
+          ctx.strokeStyle = flash > 0 ? '#666' : '#333';
+          ctx.lineWidth = 1;
+          ctx.stroke();
+        }
+      }
+    }
+
+    var playheadX = gridOffsetX + currentCol * cellSize + cellSize / 2;
+    ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+    ctx.lineWidth = cellSize;
+    ctx.beginPath();
+    ctx.moveTo(playheadX, gridOffsetY);
+    ctx.lineTo(playheadX, gridOffsetY + ROWS * cellSize);
+    ctx.stroke();
+
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(playheadX, gridOffsetY - 10);
+    ctx.lineTo(playheadX, gridOffsetY + ROWS * cellSize + 10);
+    ctx.stroke();
+
+    ctx.fillStyle = '#333';
+    ctx.font = '9px Helvetica Neue, Helvetica, Arial, sans-serif';
+    for (var r = 0; r < ROWS; r++) {
+      var label = Math.round(noteFreqs[r]) + ' Hz';
+      ctx.fillText(label, gridOffsetX - 50, gridOffsetY + r * cellSize + cellSize / 2 + 3);
+    }
+    for (var c = 0; c < COLS; c++) {
+      ctx.fillText('' + (c + 1), gridOffsetX + c * cellSize + cellSize / 2 - 3, gridOffsetY + ROWS * cellSize + 20);
+    }
+  }
+
+  function advanceSequencer(timestamp) {
+    var elapsed = (timestamp - lastBeatTime) / 1000;
+    if (elapsed >= beatInterval) {
+      lastBeatTime = timestamp;
+      currentCol = (currentCol + 1) % COLS;
+
+      var colActiveCount = 0;
+      for (var r = 0; r < ROWS; r++) {
+        if (grid[r][currentCol]) {
+          playCell(r, currentCol);
+          colActiveCount++;
+        }
+      }
+      if (colActiveCount > 0) {
+        triggerStutter(colActiveCount);
+      }
+    }
+  }
+
+  var lastTime = 0;
+  function animate(timestamp) {
+    requestAnimationFrame(animate);
+    var dt = Math.min((timestamp - lastTime) / 1000, 0.05);
+    lastTime = timestamp;
+
+    if (!started) return;
+
+    advanceSequencer(timestamp);
+
+    for (var i = flashCells.length - 1; i >= 0; i--) {
+      flashCells[i].life -= dt * 3;
+      if (flashCells[i].life <= 0) flashCells.splice(i, 1);
+    }
+
+    draw();
+
+    var activeCount = 0;
+    for (var r = 0; r < ROWS; r++) {
+      for (var c = 0; c < COLS; c++) {
+        if (grid[r][c]) activeCount++;
+      }
+    }
+    document.getElementById('stats').textContent = 'active: ' + activeCount + '/64 \u00b7 col: ' + (currentCol + 1);
+  }
+
+  function onPointerDown(e) {
+    if (!started) return;
+    var x = e.clientX;
+    var y = e.clientY;
+    if (e.touches) { x = e.touches[0].clientX; y = e.touches[0].clientY; }
+    var cell = getCellAt(x, y);
+    if (cell) {
+      grid[cell.row][cell.col] = !grid[cell.row][cell.col];
+    }
+  }
+
+  function start() {
+    if (started) return;
+    started = true;
+    initAudio();
+    lastBeatTime = performance.now();
+    document.getElementById('overlay').classList.add('hidden');
+  }
+
+  for (var r = 0; r < ROWS; r++) {
+    grid.push([]);
+    for (var c = 0; c < COLS; c++) {
+      grid[r].push(false);
+    }
+  }
+
+  initCanvas();
+
+  document.getElementById('overlay').addEventListener('pointerdown', start);
+
+  document.getElementById('info-btn').addEventListener('pointerdown', function(e) {
+    e.stopPropagation();
+    document.getElementById('info-panel').classList.toggle('visible');
+  });
+  document.getElementById('info-panel').addEventListener('pointerdown', function() {
+    this.classList.remove('visible');
+  });
+
+  window.addEventListener('pointerdown', onPointerDown);
+  window.addEventListener('touchstart', function(e) { e.preventDefault(); }, { passive: false });
+  window.addEventListener('resize', resize);
+
+  requestAnimationFrame(animate);
+
+})();
+</script>
+</body>
+</html>

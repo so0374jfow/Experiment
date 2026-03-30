@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>STRING.TENSOR — Quaternion String Synthesis v13</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#000;overflow:hidden;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;color:#fff;touch-action:none}
+canvas{display:block}
+#overlay{position:fixed;top:0;left:0;width:100%;height:100%;display:flex;align-items:center;justify-content:center;z-index:20;background:#000;cursor:pointer}
+#overlay.hidden{opacity:0;pointer-events:none;transition:opacity 0.8s}
+#overlay-text{text-align:center}
+#overlay-text h1{font-size:18px;font-weight:300;letter-spacing:0.4em;text-transform:uppercase;margin-bottom:10px}
+#overlay-text p{font-size:11px;font-weight:300;color:#888;letter-spacing:0.3em}
+#info-btn{position:fixed;top:16px;left:16px;width:32px;height:32px;border-radius:50%;border:1px solid #555;background:transparent;color:#888;font-size:14px;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;cursor:pointer;z-index:15;display:flex;align-items:center;justify-content:center;transition:border-color 0.3s,color 0.3s}
+#info-btn:hover{border-color:#fff;color:#fff}
+#info-panel{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.92);z-index:14;display:none;align-items:center;justify-content:center;padding:40px}
+#info-panel.visible{display:flex}
+#info-content{max-width:560px;font-size:13px;line-height:1.8;color:#ccc;font-weight:300;letter-spacing:0.02em}
+#info-content h2{font-size:15px;font-weight:400;letter-spacing:0.3em;text-transform:uppercase;color:#fff;margin-bottom:16px}
+#title-bar{position:fixed;top:16px;left:60px;font-size:10px;letter-spacing:0.3em;text-transform:uppercase;color:#333;z-index:10}
+#stats{position:fixed;bottom:16px;right:16px;font-size:9px;letter-spacing:0.15em;color:#333;z-index:10;text-align:right}
+</style>
+</head>
+<body>
+<div id="overlay">
+  <div id="overlay-text">
+    <h1>string.tensor</h1>
+    <p>click to begin</p>
+  </div>
+</div>
+<button id="info-btn">i</button>
+<div id="info-panel">
+  <div id="info-content">
+    <h2>string.tensor</h2>
+    Eight strings are tuned to a quaternion-derived harmonic series. Each string's rest state is a specific quaternion rotation: string 1 = 0°, string 2 = 22.5°, up to string 8 = 157.5°. When you pluck a string, its quaternion is perturbed and oscillates back to rest via damped SLERP — the oscillation drives a Karplus-Strong-like synthesis. The rotation angle maps to frequency: smaller angles = lower pitch, larger angles = higher pitch. Neighboring strings are coupled via quaternion interpolation — plucking string 4 gently excites strings 3 and 5, creating sympathetic resonance.
+  </div>
+</div>
+<div id="title-bar">STRING.TENSOR — quaternion string synthesis</div>
+<div id="stats"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function(){
+  'use strict';
+
+  var audioCtx, masterGain;
+  var started = false;
+  var canvas, ctx;
+  var WIDTH, HEIGHT;
+  var NUM_STRINGS = 8;
+  var RESOLUTION = 200;
+  var strings = [];
+  var dragging = -1;
+  var dragStartY = 0;
+
+  var baseFreqs = [110, 146.83, 196, 261.63, 349.23, 440, 587.33, 783.99];
+
+  function initAudio() {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    masterGain = audioCtx.createGain();
+    masterGain.gain.value = 0.4;
+    masterGain.connect(audioCtx.destination);
+  }
+
+  function createString(index) {
+    var angle = index * 22.5 * Math.PI / 180;
+    var halfAngle = angle * 0.5;
+    return {
+      index: index,
+      restQuat: new THREE.Quaternion(0, Math.sin(halfAngle), 0, Math.cos(halfAngle)),
+      currentQuat: new THREE.Quaternion(0, Math.sin(halfAngle), 0, Math.cos(halfAngle)),
+      perturbQuat: new THREE.Quaternion(0, Math.sin(halfAngle), 0, Math.cos(halfAngle)),
+      displacement: new Float32Array(RESOLUTION),
+      velocity: new Float32Array(RESOLUTION),
+      amplitude: 0,
+      energy: 0,
+      damping: 0.997,
+      frequency: baseFreqs[index],
+      y: 0,
+      active: false
+    };
+  }
+
+  function pluckString(idx, strength, pluckPos) {
+    var s = strings[idx];
+    s.active = true;
+    s.energy = strength;
+    s.amplitude = strength;
+
+    var pluckIndex = Math.floor(pluckPos * RESOLUTION);
+    pluckIndex = Math.max(1, Math.min(RESOLUTION - 2, pluckIndex));
+
+    for (var i = 0; i < RESOLUTION; i++) {
+      if (i <= pluckIndex) {
+        s.displacement[i] = strength * 30 * (i / pluckIndex);
+      } else {
+        s.displacement[i] = strength * 30 * ((RESOLUTION - 1 - i) / (RESOLUTION - 1 - pluckIndex));
+      }
+      s.velocity[i] = 0;
+    }
+
+    var halfAngle = (s.index * 22.5 + strength * 45) * Math.PI / 180;
+    s.perturbQuat.set(0, Math.sin(halfAngle), 0, Math.cos(halfAngle));
+
+    playStringSound(idx, strength);
+
+    var coupling = strength * 0.2;
+    if (idx > 0 && !strings[idx-1].active) {
+      exciteString(idx - 1, coupling, pluckPos);
+    }
+    if (idx < NUM_STRINGS - 1 && !strings[idx+1].active) {
+      exciteString(idx + 1, coupling, pluckPos);
+    }
+  }
+
+  function exciteString(idx, strength, pluckPos) {
+    var s = strings[idx];
+    s.active = true;
+    s.energy = Math.max(s.energy, strength);
+    s.amplitude = Math.max(s.amplitude, strength);
+
+    var pluckIndex = Math.floor(pluckPos * RESOLUTION);
+    pluckIndex = Math.max(1, Math.min(RESOLUTION - 2, pluckIndex));
+
+    for (var i = 0; i < RESOLUTION; i++) {
+      if (i <= pluckIndex) {
+        s.displacement[i] += strength * 15 * (i / pluckIndex);
+      } else {
+        s.displacement[i] += strength * 15 * ((RESOLUTION - 1 - i) / (RESOLUTION - 1 - pluckIndex));
+      }
+    }
+
+    playStringSound(idx, strength * 0.5);
+  }
+
+  function playStringSound(idx, strength) {
+    var s = strings[idx];
+    var now = audioCtx.currentTime;
+    var freq = s.frequency;
+
+    var q = s.perturbQuat;
+    var angle = 2 * Math.acos(Math.min(1, Math.abs(q.w)));
+    freq *= (0.8 + angle / Math.PI * 0.4);
+
+    var numHarmonics = Math.floor(1 + strength * 6);
+    var duration = 1.5 + strength * 2;
+
+    for (var h = 1; h <= numHarmonics; h++) {
+      var osc = audioCtx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.value = freq * h;
+
+      var gain = audioCtx.createGain();
+      var harmonicAmp = strength * 0.12 / (h * h);
+      gain.gain.setValueAtTime(0, now);
+      gain.gain.linearRampToValueAtTime(harmonicAmp, now + 0.003);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+
+      osc.connect(gain);
+      gain.connect(masterGain);
+      osc.start(now);
+      osc.stop(now + duration + 0.01);
+      osc.onended = function() { osc.disconnect(); gain.disconnect(); };
+    }
+
+    // Stutter burst for hard plucks — simulates aggressive string buzz
+    if (strength > 0.3) {
+      var stutterIntensity = Math.min(1, (strength - 0.3) / 0.7); // 0..1
+      var stutterFreqList = [3000, 4200, 5500, 6800];
+      var numStutterOscs = Math.floor(2 + stutterIntensity * 3); // 2-5 oscillators
+      var stutterLFORate = 8 + stutterIntensity * 32; // 8-40 Hz gating
+      var stutterDuration = 0.08 + stutterIntensity * 0.25; // 80-330ms burst
+      var stutterVol = 0.02 + stutterIntensity * 0.03; // 0.02-0.05
+
+      // Square-wave LFO for rapid gating
+      var lfo = audioCtx.createOscillator();
+      lfo.type = 'square';
+      lfo.frequency.value = stutterLFORate;
+      var lfoGain = audioCtx.createGain();
+      lfoGain.gain.value = stutterVol;
+      lfo.connect(lfoGain);
+
+      for (var si = 0; si < numStutterOscs; si++) {
+        var sOsc = audioCtx.createOscillator();
+        sOsc.type = 'sine';
+        sOsc.frequency.value = stutterFreqList[si] + (Math.random() - 0.5) * 400;
+        var sGain = audioCtx.createGain();
+        sGain.gain.value = 0;
+        // LFO modulates the gain
+        lfoGain.connect(sGain.gain);
+        sOsc.connect(sGain);
+
+        // Envelope: decay over stutterDuration
+        var envGain = audioCtx.createGain();
+        envGain.gain.setValueAtTime(1, now);
+        envGain.gain.exponentialRampToValueAtTime(0.001, now + stutterDuration);
+        sGain.connect(envGain);
+        envGain.connect(masterGain);
+
+        sOsc.start(now);
+        sOsc.stop(now + stutterDuration + 0.01);
+        (function(o, s, e) {
+          o.onended = function() { o.disconnect(); s.disconnect(); e.disconnect(); };
+        })(sOsc, sGain, envGain);
+      }
+
+      lfo.start(now);
+      lfo.stop(now + stutterDuration + 0.01);
+      lfo.onended = function() { lfo.disconnect(); lfoGain.disconnect(); };
+    }
+  }
+
+  function updateStrings() {
+    var tension = 0.4;
+    for (var si = 0; si < NUM_STRINGS; si++) {
+      var s = strings[si];
+      if (!s.active) continue;
+
+      for (var i = 1; i < RESOLUTION - 1; i++) {
+        var force = tension * (s.displacement[i-1] + s.displacement[i+1] - 2 * s.displacement[i]);
+        s.velocity[i] += force;
+        s.velocity[i] *= s.damping;
+      }
+      for (var i = 1; i < RESOLUTION - 1; i++) {
+        s.displacement[i] += s.velocity[i];
+      }
+      s.displacement[0] = 0;
+      s.displacement[RESOLUTION - 1] = 0;
+
+      s.energy *= 0.999;
+      s.amplitude *= 0.998;
+
+      s.currentQuat.slerpQuaternions(s.perturbQuat, s.restQuat, 1 - s.amplitude);
+
+      if (s.energy < 0.001) {
+        s.active = false;
+        s.energy = 0;
+        s.amplitude = 0;
+        for (var i = 0; i < RESOLUTION; i++) {
+          s.displacement[i] = 0;
+          s.velocity[i] = 0;
+        }
+        s.currentQuat.copy(s.restQuat);
+      }
+    }
+  }
+
+  function initCanvas() {
+    canvas = document.createElement('canvas');
+    canvas.style.display = 'block';
+    document.body.appendChild(canvas);
+    ctx = canvas.getContext('2d');
+    resize();
+  }
+
+  function resize() {
+    WIDTH = window.innerWidth;
+    HEIGHT = window.innerHeight;
+    canvas.width = WIDTH;
+    canvas.height = HEIGHT;
+    var margin = HEIGHT * 0.1;
+    var spacing = (HEIGHT - margin * 2) / (NUM_STRINGS - 1);
+    for (var i = 0; i < strings.length; i++) {
+      strings[i].y = margin + i * spacing;
+    }
+  }
+
+  function draw() {
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+    var padX = WIDTH * 0.08;
+    var stringWidth = WIDTH - padX * 2;
+
+    for (var si = 0; si < NUM_STRINGS; si++) {
+      var s = strings[si];
+      var baseY = s.y;
+
+      ctx.beginPath();
+      for (var i = 0; i < RESOLUTION; i++) {
+        var x = padX + (i / (RESOLUTION - 1)) * stringWidth;
+        var y = baseY + s.displacement[i];
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+
+      var brightness;
+      if (s.active) {
+        brightness = Math.floor(100 + s.amplitude * 155);
+      } else {
+        brightness = 80;
+      }
+      ctx.strokeStyle = 'rgb(' + brightness + ',' + brightness + ',' + brightness + ')';
+      ctx.lineWidth = s.active ? 1.5 + s.amplitude : 1;
+      ctx.stroke();
+
+      ctx.fillStyle = '#333';
+      ctx.font = '9px Helvetica Neue, Helvetica, Arial, sans-serif';
+      ctx.fillText(Math.round(s.frequency) + ' Hz', padX - 45, baseY + 3);
+
+      if (s.active) {
+        ctx.fillStyle = 'rgba(255,255,255,' + (s.amplitude * 0.08) + ')';
+        ctx.fillRect(padX, baseY - 20, stringWidth, 40);
+      }
+    }
+  }
+
+  function getStringAt(y) {
+    var threshold = (HEIGHT * 0.8) / (NUM_STRINGS - 1) * 0.4;
+    for (var i = 0; i < NUM_STRINGS; i++) {
+      if (Math.abs(y - strings[i].y) < threshold) return i;
+    }
+    return -1;
+  }
+
+  function onPointerDown(e) {
+    if (!started) return;
+    var y = e.clientY;
+    var idx = getStringAt(y);
+    if (idx >= 0) {
+      dragging = idx;
+      dragStartY = y;
+    }
+  }
+
+  function onPointerMove(e) {
+    if (dragging < 0) return;
+    var y = e.clientY;
+    var x = e.clientX;
+    var dist = Math.abs(y - strings[dragging].y);
+    var padX = WIDTH * 0.08;
+    var stringWidth = WIDTH - padX * 2;
+    var pluckPos = Math.max(0, Math.min(1, (x - padX) / stringWidth));
+
+    var pluckIndex = Math.floor(pluckPos * RESOLUTION);
+    pluckIndex = Math.max(1, Math.min(RESOLUTION - 2, pluckIndex));
+
+    var maxDisp = 40;
+    var disp = Math.min(maxDisp, dist) * Math.sign(y - strings[dragging].y);
+    for (var i = 0; i < RESOLUTION; i++) {
+      if (i <= pluckIndex) {
+        strings[dragging].displacement[i] = disp * (i / pluckIndex);
+      } else {
+        strings[dragging].displacement[i] = disp * ((RESOLUTION - 1 - i) / (RESOLUTION - 1 - pluckIndex));
+      }
+    }
+  }
+
+  function onPointerUp(e) {
+    if (dragging < 0) return;
+    var y = e.clientY || dragStartY;
+    var x = e.clientX || (WIDTH * 0.5);
+    var dist = Math.abs(y - strings[dragging].y);
+    var strength = Math.min(1, dist / 80);
+    var padX = WIDTH * 0.08;
+    var stringWidth = WIDTH - padX * 2;
+    var pluckPos = Math.max(0.1, Math.min(0.9, (x - padX) / stringWidth));
+
+    if (strength > 0.05) {
+      pluckString(dragging, strength, pluckPos);
+    } else {
+      for (var i = 0; i < RESOLUTION; i++) {
+        strings[dragging].displacement[i] = 0;
+      }
+    }
+    dragging = -1;
+  }
+
+  var lastTime = 0;
+  function animate(timestamp) {
+    requestAnimationFrame(animate);
+    if (!started) return;
+
+    updateStrings();
+    draw();
+
+    var activeCount = 0;
+    for (var i = 0; i < NUM_STRINGS; i++) {
+      if (strings[i].active) activeCount++;
+    }
+    document.getElementById('stats').textContent = 'active: ' + activeCount + '/' + NUM_STRINGS;
+  }
+
+  function start() {
+    if (started) return;
+    started = true;
+    initAudio();
+    document.getElementById('overlay').classList.add('hidden');
+  }
+
+  for (var i = 0; i < NUM_STRINGS; i++) {
+    strings.push(createString(i));
+  }
+
+  initCanvas();
+  resize();
+
+  document.getElementById('overlay').addEventListener('pointerdown', start);
+
+  document.getElementById('info-btn').addEventListener('pointerdown', function(e) {
+    e.stopPropagation();
+    document.getElementById('info-panel').classList.toggle('visible');
+  });
+  document.getElementById('info-panel').addEventListener('pointerdown', function() {
+    this.classList.remove('visible');
+  });
+
+  window.addEventListener('pointerdown', onPointerDown);
+  window.addEventListener('pointermove', onPointerMove);
+  window.addEventListener('pointerup', onPointerUp);
+  window.addEventListener('pointercancel', onPointerUp);
+  window.addEventListener('touchstart', function(e) { e.preventDefault(); }, { passive: false });
+  window.addEventListener('touchmove', function(e) { e.preventDefault(); }, { passive: false });
+  window.addEventListener('resize', resize);
+
+  requestAnimationFrame(animate);
+
+})();
+</script>
+</body>
+</html>

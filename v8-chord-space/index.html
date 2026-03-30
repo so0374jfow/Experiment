@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>CHORD.SPACE — Quaternion Sound Synthesis v8</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#000;overflow:hidden;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;color:#fff;touch-action:none}
+canvas{display:block}
+#overlay{position:fixed;top:0;left:0;width:100%;height:100%;display:flex;align-items:center;justify-content:center;z-index:100;background:#000;cursor:pointer}
+#overlay.hidden{opacity:0;pointer-events:none;transition:opacity 1s}
+#overlay-text{text-align:center;letter-spacing:0.3em;text-transform:uppercase}
+#overlay-text h1{font-size:16px;font-weight:300;margin-bottom:10px;color:#fff}
+#overlay-text p{font-size:10px;font-weight:300;color:#888;letter-spacing:0.5em}
+#info-btn{position:fixed;top:16px;left:16px;width:32px;height:32px;border-radius:50%;border:1px solid #555;background:transparent;color:#fff;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:14px;font-style:italic;cursor:pointer;z-index:90;display:flex;align-items:center;justify-content:center;transition:border-color 0.3s}
+#info-btn:hover{border-color:#fff}
+#info-panel{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.92);z-index:80;display:none;align-items:center;justify-content:center;padding:40px}
+#info-panel.visible{display:flex}
+#info-content{max-width:560px;font-size:13px;line-height:1.8;color:#ccc;letter-spacing:0.02em}
+#info-content h2{font-size:14px;font-weight:400;letter-spacing:0.3em;text-transform:uppercase;color:#fff;margin-bottom:16px}
+#hud{position:fixed;bottom:16px;left:16px;font-size:9px;color:#333;letter-spacing:0.15em;z-index:5;text-transform:uppercase}
+</style>
+</head>
+<body>
+<div id="overlay">
+  <div id="overlay-text">
+    <h1>chord.space</h1>
+    <p>click to begin</p>
+  </div>
+</div>
+<button id="info-btn">i</button>
+<div id="info-panel">
+  <div id="info-content">
+    <h2>Chord.Space</h2>
+    Each point you place on the sphere represents a unit quaternion — a point in 4D rotation space projected onto 3D. The angular distance between any two quaternions (measured by the .angleTo() method) determines their musical interval. Close quaternions (small angle) produce consonant intervals like octaves and fifths. Distant quaternions (angle near &pi;) produce dissonant intervals like tritones. Each node generates a sine tone whose frequency is derived from its quaternion components via: freq = 220 &times; (1 + |q.x| + |q.y| &times; 0.5 + |q.z| &times; 0.25).
+  </div>
+</div>
+<div id="hud"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function(){
+  'use strict';
+
+  let audioCtx, masterGain;
+  let scene, camera, renderer;
+  let sphereWire, nodesGroup, linesGroup;
+  let started = false;
+  let raycaster, mouse;
+  let stutterOscs = [], stutterGains = [], stutterLFO, stutterLFOGain, stutterMaster;
+
+  const WIDTH = () => window.innerWidth;
+  const HEIGHT = () => window.innerHeight;
+
+  const MAX_NODES = 8;
+  const SPHERE_RADIUS = 2;
+
+  // Node data: { mesh, quaternion, osc, gain, position }
+  const nodes = [];
+
+  // Line meshes for connections
+  let connectionLines = [];
+
+  // Invisible sphere for raycasting
+  let hitSphere;
+
+  // Slow rotation for visual interest
+  let sphereRotation = 0;
+
+  // --- THREE.JS SETUP ---
+  function initScene() {
+    scene = new THREE.Scene();
+    camera = new THREE.PerspectiveCamera(55, WIDTH() / HEIGHT(), 0.1, 100);
+    camera.position.z = 6;
+
+    renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(WIDTH(), HEIGHT());
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setClearColor(0x000000);
+    document.body.appendChild(renderer.domElement);
+
+    raycaster = new THREE.Raycaster();
+    mouse = new THREE.Vector2();
+
+    // Wireframe sphere
+    const sphereGeom = new THREE.SphereGeometry(SPHERE_RADIUS, 24, 16);
+    const wireGeom = new THREE.WireframeGeometry(sphereGeom);
+    sphereWire = new THREE.LineSegments(wireGeom, new THREE.LineBasicMaterial({ color: 0x333333 }));
+    scene.add(sphereWire);
+
+    // Invisible hit sphere for raycasting
+    const hitGeom = new THREE.SphereGeometry(SPHERE_RADIUS, 32, 24);
+    const hitMat = new THREE.MeshBasicMaterial({ visible: false });
+    hitSphere = new THREE.Mesh(hitGeom, hitMat);
+    scene.add(hitSphere);
+
+    // Groups for nodes and lines
+    nodesGroup = new THREE.Group();
+    scene.add(nodesGroup);
+    linesGroup = new THREE.Group();
+    scene.add(linesGroup);
+  }
+
+  // --- AUDIO ---
+  function initAudio() {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    masterGain = audioCtx.createGain();
+    masterGain.gain.value = 0.35;
+    masterGain.connect(audioCtx.destination);
+
+    // Stutter oscillator bank: 4 high-pitch sines gated by square-wave LFO
+    stutterMaster = audioCtx.createGain();
+    stutterMaster.gain.value = 0;
+    stutterMaster.connect(masterGain);
+
+    stutterLFO = audioCtx.createOscillator();
+    stutterLFO.type = 'square';
+    stutterLFO.frequency.value = 15;
+    stutterLFOGain = audioCtx.createGain();
+    stutterLFOGain.gain.value = 0;
+    stutterLFO.connect(stutterLFOGain);
+    stutterLFO.start();
+
+    [3400, 5100, 6300, 7800].forEach(freq => {
+      const osc = audioCtx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      const gain = audioCtx.createGain();
+      gain.gain.value = 0;
+      osc.connect(gain);
+      stutterLFOGain.connect(gain.gain);
+      gain.connect(stutterMaster);
+      osc.start();
+      stutterOscs.push(osc);
+      stutterGains.push(gain);
+    });
+  }
+
+  function quatToFreq(q) {
+    return 220 * (1 + Math.abs(q.x) + Math.abs(q.y) * 0.5 + Math.abs(q.z) * 0.25);
+  }
+
+  function createNodeAudio(q) {
+    const osc = audioCtx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.value = quatToFreq(q);
+
+    const gain = audioCtx.createGain();
+    gain.gain.value = 0;
+    osc.connect(gain);
+    gain.connect(masterGain);
+    osc.start();
+
+    // Fade in
+    const t = audioCtx.currentTime;
+    gain.gain.setTargetAtTime(0.2 / Math.max(nodes.length + 1, 1), t, 0.08);
+
+    return { osc, gain };
+  }
+
+  function removeNodeAudio(audio) {
+    const t = audioCtx.currentTime;
+    audio.gain.gain.setTargetAtTime(0, t, 0.05);
+    setTimeout(() => {
+      try { audio.osc.stop(); } catch(e) {}
+    }, 400);
+  }
+
+  function triggerStutterBurst() {
+    if (!stutterMaster) return;
+    const t = audioCtx.currentTime;
+    // Brief burst: ramp up quickly, fade over 0.3s
+    stutterLFO.frequency.setTargetAtTime(20 + Math.random() * 20, t, 0.01);
+    stutterLFOGain.gain.setTargetAtTime(0.05, t, 0.01);
+    stutterLFOGain.gain.setTargetAtTime(0, t + 0.15, 0.15);
+  }
+
+  function updateContinuousStutter() {
+    if (!stutterMaster) return;
+    const t = audioCtx.currentTime;
+    // Subtle continuous stutter that grows with node count
+    const intensity = Math.min(nodes.length * 0.008, 0.04);
+    stutterMaster.gain.setTargetAtTime(intensity > 0 ? 1 : 0, t, 0.1);
+    stutterLFOGain.gain.setTargetAtTime(intensity, t, 0.3);
+    stutterLFO.frequency.setTargetAtTime(8 + nodes.length * 3, t, 0.1);
+  }
+
+  function rebalanceGains() {
+    if (!audioCtx) return;
+    const t = audioCtx.currentTime;
+    const vol = nodes.length > 0 ? 0.2 / nodes.length : 0;
+    nodes.forEach(n => {
+      n.gain.gain.setTargetAtTime(vol, t, 0.1);
+    });
+  }
+
+  // --- POSITION TO QUATERNION ---
+  function positionToQuaternion(pos) {
+    // Map sphere surface point to a unit quaternion
+    // Use the point on the sphere as an axis-angle rotation
+    const norm = pos.clone().normalize();
+    // The w component from the position magnitude mapping
+    // Use spherical coordinates to create a quaternion
+    const theta = Math.atan2(norm.y, norm.x);
+    const phi = Math.acos(Math.max(-1, Math.min(1, norm.z)));
+
+    const q = new THREE.Quaternion();
+    q.setFromAxisAngle(new THREE.Vector3(
+      Math.sin(phi) * Math.cos(theta),
+      Math.sin(phi) * Math.sin(theta),
+      Math.cos(phi)
+    ), phi);
+    q.normalize();
+    return q;
+  }
+
+  // --- NODE MANAGEMENT ---
+  function addNode(pos) {
+    if (nodes.length >= MAX_NODES) return;
+
+    const q = positionToQuaternion(pos);
+    const freq = quatToFreq(q);
+
+    // Visual: white dot
+    const dotGeom = new THREE.SphereGeometry(0.08, 12, 8);
+    const dotMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+    const mesh = new THREE.Mesh(dotGeom, dotMat);
+    mesh.position.copy(pos);
+    nodesGroup.add(mesh);
+
+    // Audio
+    const audio = createNodeAudio(q);
+
+    const node = {
+      mesh: mesh,
+      position: pos.clone(),
+      quaternion: q,
+      freq: freq,
+      osc: audio.osc,
+      gain: audio.gain
+    };
+    nodes.push(node);
+
+    rebalanceGains();
+    updateConnections();
+    triggerStutterBurst();
+    updateContinuousStutter();
+  }
+
+  function removeNode(index) {
+    const node = nodes[index];
+    nodesGroup.remove(node.mesh);
+    node.mesh.geometry.dispose();
+    node.mesh.material.dispose();
+    removeNodeAudio({ osc: node.osc, gain: node.gain });
+    nodes.splice(index, 1);
+
+    rebalanceGains();
+    updateConnections();
+    triggerStutterBurst();
+    updateContinuousStutter();
+  }
+
+  function findNearestNode(pos, threshold) {
+    let minDist = Infinity;
+    let minIdx = -1;
+    for (let i = 0; i < nodes.length; i++) {
+      const d = pos.distanceTo(nodes[i].position);
+      if (d < threshold && d < minDist) {
+        minDist = d;
+        minIdx = i;
+      }
+    }
+    return minIdx;
+  }
+
+  // --- CONNECTIONS ---
+  function updateConnections() {
+    // Remove old lines
+    for (let i = linesGroup.children.length - 1; i >= 0; i--) {
+      const line = linesGroup.children[i];
+      line.geometry.dispose();
+      line.material.dispose();
+      linesGroup.remove(line);
+    }
+    connectionLines = [];
+
+    if (nodes.length < 2) return;
+
+    for (let i = 0; i < nodes.length; i++) {
+      for (let j = i + 1; j < nodes.length; j++) {
+        const q1 = nodes[i].quaternion;
+        const q2 = nodes[j].quaternion;
+        const angle = q1.angleTo(q2);
+
+        // Consonance: closer = more consonant = brighter line
+        // Angle range: 0 to PI
+        const consonance = 1 - (angle / Math.PI);
+        const brightness = 0.15 + consonance * 0.85;
+
+        const points = [nodes[i].position.clone(), nodes[j].position.clone()];
+        const geom = new THREE.BufferGeometry().setFromPoints(points);
+        const gray = Math.floor(brightness * 255);
+        const mat = new THREE.LineBasicMaterial({
+          color: new THREE.Color(gray / 255, gray / 255, gray / 255)
+        });
+        const line = new THREE.LineSegments(geom, mat);
+        linesGroup.add(line);
+        connectionLines.push({ line, i, j, consonance });
+      }
+    }
+  }
+
+  // --- POINTER ---
+  function onPointerDown(e) {
+    if (!started) return;
+
+    // Ignore if info panel is visible
+    if (document.getElementById('info-panel').classList.contains('visible')) return;
+
+    mouse.x = (e.clientX / WIDTH()) * 2 - 1;
+    mouse.y = -(e.clientY / HEIGHT()) * 2 + 1;
+
+    raycaster.setFromCamera(mouse, camera);
+    const intersects = raycaster.intersectObject(hitSphere);
+
+    if (intersects.length > 0) {
+      const point = intersects[0].point;
+
+      // Check if near an existing node (click to remove)
+      const nearIdx = findNearestNode(point, 0.4);
+      if (nearIdx >= 0) {
+        removeNode(nearIdx);
+      } else {
+        addNode(point);
+      }
+    }
+  }
+
+  // --- UI ---
+  function initUI() {
+    const btn = document.getElementById('info-btn');
+    const panel = document.getElementById('info-panel');
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      panel.classList.toggle('visible');
+    });
+    panel.addEventListener('click', () => {
+      panel.classList.remove('visible');
+    });
+  }
+
+  function start() {
+    if (started) return;
+    started = true;
+    initAudio();
+    document.getElementById('overlay').classList.add('hidden');
+  }
+
+  // --- ANIMATE ---
+  function animate() {
+    requestAnimationFrame(animate);
+
+    // Slow rotation for visual interest
+    sphereRotation += 0.002;
+    sphereWire.rotation.y = sphereRotation;
+    hitSphere.rotation.y = sphereRotation;
+    nodesGroup.rotation.y = sphereRotation;
+    linesGroup.rotation.y = sphereRotation;
+
+    // Update connection line positions (nodes rotate with group so lines stay correct)
+
+    // HUD
+    const hud = document.getElementById('hud');
+    if (nodes.length === 0) {
+      hud.textContent = 'nodes: 0 / ' + MAX_NODES + '  |  click sphere to place';
+    } else {
+      const freqs = nodes.map(n => n.freq.toFixed(0) + ' Hz').join(', ');
+      hud.textContent = 'nodes: ' + nodes.length + ' / ' + MAX_NODES + '  |  ' + freqs;
+    }
+
+    renderer.render(scene, camera);
+  }
+
+  // --- INIT ---
+  function init() {
+    initScene();
+    initUI();
+
+    document.getElementById('overlay').addEventListener('pointerdown', (e) => {
+      start();
+    });
+
+    const canvas = renderer.domElement;
+    canvas.addEventListener('pointerdown', onPointerDown);
+
+    window.addEventListener('resize', () => {
+      camera.aspect = WIDTH() / HEIGHT();
+      camera.updateProjectionMatrix();
+      renderer.setSize(WIDTH(), HEIGHT());
+    });
+
+    animate();
+  }
+
+  init();
+})();
+</script>
+</body>
+</html>
