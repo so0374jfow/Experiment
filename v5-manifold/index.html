@@ -392,9 +392,9 @@ canvas{display:block}
     // Fog density from audio
     scene.fog.density = 0.04 + low * 0.04;
 
-    // Background color subtle shift
-    const bgHue = 0.68 + Math.sin(time * 0.002) * 0.03;
-    const bgColor = new THREE.Color().setHSL(bgHue, 0.3, 0.01 + low * 0.02);
+    // Background brightness subtle shift (grayscale)
+    const bgLight = 0.01 + low * 0.02;
+    const bgColor = new THREE.Color().setHSL(0, 0, bgLight);
     renderer.setClearColor(bgColor);
 
     // Data display
