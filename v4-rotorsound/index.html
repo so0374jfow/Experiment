@@ -144,7 +144,7 @@ canvas{display:block}
 
     // Create ring geometries
     const ringRadii = [3, 3.5, 4, 4.5, 5, 5.5];
-    const ringColors = [0xddddcc, 0xccccbb, 0xbbbbaa, 0xaaaa99, 0x999988, 0x888877];
+    const ringColors = [0xdddddd, 0xcccccc, 0xbbbbbb, 0xaaaaaa, 0x999999, 0x888888];
 
     for (let i = 0; i < NUM_RINGS; i++) {
       // Torus ring
@@ -173,7 +173,7 @@ canvas{display:block}
 
     // Central point — listener position
     const centerGeo = new THREE.SphereGeometry(0.04, 8, 8);
-    const centerMat = new THREE.MeshBasicMaterial({ color: 0x444440 });
+    const centerMat = new THREE.MeshBasicMaterial({ color: 0x444444 });
     scene.add(new THREE.Mesh(centerGeo, centerMat));
 
     window.addEventListener('resize', onResize);
