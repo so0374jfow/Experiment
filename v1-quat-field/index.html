@@ -262,9 +262,8 @@ canvas{display:block}
     pointsMesh.material.opacity = 0.4 + avg * 0.5;
     linesMesh.material.opacity = 0.08 + avg * 0.12;
 
-    // Subtle color shift
-    const hue = 0.6 + Math.sin(time * 0.02) * 0.05;
-    pointsMesh.material.color.setHSL(hue, 0.4, 0.6 + avg * 0.2);
+    // Subtle brightness shift (grayscale)
+    pointsMesh.material.color.setHSL(0, 0, 0.6 + avg * 0.2);
 
     // Camera slow orbit
     const camAngle = time * 0.015;

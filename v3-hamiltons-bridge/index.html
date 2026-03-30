@@ -130,7 +130,7 @@ canvas{display:block}
     renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    renderer.setClearColor(0x020100);
+    renderer.setClearColor(0x000000);
     document.body.appendChild(renderer.domElement);
 
     // Unit sphere wireframe
@@ -191,7 +191,7 @@ canvas{display:block}
       }
       const geo = new THREE.BufferGeometry().setFromPoints(circlePoints);
       const mat = new THREE.LineBasicMaterial({
-        color: 0x886600,
+        color: 0x333333,
         transparent: true,
         opacity: 0.04
       });
@@ -211,7 +211,7 @@ canvas{display:block}
       );
     }
     starGeo.setAttribute('position', new THREE.Float32BufferAttribute(starPositions, 3));
-    const starMat = new THREE.PointsMaterial({ color: 0x443300, size: 0.05, transparent: true, opacity: 0.3 });
+    const starMat = new THREE.PointsMaterial({ color: 0x222222, size: 0.05, transparent: true, opacity: 0.3 });
     scene.add(new THREE.Points(starGeo, starMat));
 
     window.addEventListener('resize', onResize);

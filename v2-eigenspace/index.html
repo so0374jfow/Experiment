@@ -169,7 +169,7 @@ canvas{display:block}
     renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    renderer.setClearColor(0x020004);
+    renderer.setClearColor(0x000000);
     document.body.appendChild(renderer.domElement);
 
     // Create ribbon geometries — spectral bands that twist
@@ -178,7 +178,7 @@ canvas{display:block}
       const geo = new THREE.TubeGeometry(curve, 128, 0.02 + r * 0.008, 8, false);
       const hue = r / NUM_RIBBONS;
       const mat = new THREE.MeshBasicMaterial({
-        color: new THREE.Color().setHSL(hue, 0.8, 0.5),
+        color: new THREE.Color().setHSL(0, 0, 0.3 + hue * 0.4),
         transparent: true,
         opacity: 0.4,
         wireframe: true
@@ -337,9 +337,8 @@ canvas{display:block}
       const curve = new THREE.CatmullRomCurve3(points);
       ribbon.mesh.geometry = new THREE.TubeGeometry(curve, 128, 0.015 + bandVal * 0.03, 6, false);
 
-      // Color from spectrum
-      const hue = (ribbon.hue + time * 0.01 + bandVal * 0.3) % 1;
-      ribbon.mesh.material.color.setHSL(hue, 0.7 + bandVal * 0.3, 0.4 + bandVal * 0.3);
+      // Brightness from spectrum (grayscale)
+      ribbon.mesh.material.color.setHSL(0, 0, 0.3 + bandVal * 0.4);
       ribbon.mesh.material.opacity = 0.2 + bandVal * 0.5;
     }
 
@@ -350,11 +349,9 @@ canvas{display:block}
     camera.position.set(cx, cy, cz);
     camera.lookAt(Math.sin(time * 0.007) * 2, 0, Math.cos(time * 0.011) * 2);
 
-    // Background color pulse
-    const bgR = 0.008 + bands[0] * 0.03;
-    const bgG = 0.0;
-    const bgB = 0.015 + bands[4] * 0.04;
-    renderer.setClearColor(new THREE.Color(bgR, bgG, bgB));
+    // Background brightness pulse (grayscale)
+    const bgVal = 0.005 + bands[0] * 0.02;
+    renderer.setClearColor(new THREE.Color(bgVal, bgVal, bgVal));
 
     // Quaternion data
     const q1q2 = quatMultiply(q1, q2);
