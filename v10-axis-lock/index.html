@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AXIS.LOCK — Quaternion Sound Synthesis v10</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#000;overflow:hidden;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;color:#fff;touch-action:none}
+canvas{display:block}
+#overlay{position:fixed;top:0;left:0;width:100%;height:100%;display:flex;align-items:center;justify-content:center;z-index:20;background:#000;cursor:pointer}
+#overlay.hidden{opacity:0;pointer-events:none;transition:opacity 1s}
+#overlay-text{text-align:center;letter-spacing:0.3em;text-transform:uppercase}
+#overlay-text h1{font-size:16px;font-weight:300;margin-bottom:10px;color:#fff}
+#overlay-text p{font-size:10px;font-weight:300;color:#888;letter-spacing:0.5em}
+#info-btn{position:fixed;top:16px;left:16px;width:32px;height:32px;border-radius:50%;border:1px solid #555;background:transparent;color:#888;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:14px;font-style:italic;cursor:pointer;z-index:15;display:flex;align-items:center;justify-content:center;transition:border-color 0.3s,color 0.3s}
+#info-btn:hover{border-color:#fff;color:#fff}
+#info-panel{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.88);z-index:14;display:none;align-items:center;justify-content:center;padding:40px}
+#info-panel.visible{display:flex}
+#info-content{max-width:520px;font-size:13px;line-height:1.7;color:#ccc;font-weight:300;letter-spacing:0.02em}
+#info-content h2{font-size:12px;font-weight:400;letter-spacing:0.3em;text-transform:uppercase;color:#fff;margin-bottom:16px}
+#controls{position:fixed;bottom:40px;left:50%;transform:translateX(-50%);display:flex;gap:24px;z-index:10}
+.axis-btn{width:64px;height:64px;border-radius:50%;border:2px solid #333;background:transparent;color:#333;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:24px;font-weight:300;font-style:italic;cursor:pointer;transition:all 0.3s;display:flex;align-items:center;justify-content:center}
+.axis-btn.active{border-color:#fff;color:#fff;background:rgba(255,255,255,0.08)}
+.axis-btn:hover{border-color:#888}
+#title-bar{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);font-size:9px;letter-spacing:0.4em;text-transform:uppercase;color:#333;z-index:5}
+#speed-label{position:fixed;top:16px;right:16px;font-size:9px;letter-spacing:0.2em;text-transform:uppercase;color:#333;z-index:5}
+</style>
+</head>
+<body>
+<div id="overlay">
+  <div id="overlay-text">
+    <h1>axis.lock</h1>
+    <p>click to begin</p>
+  </div>
+</div>
+<button id="info-btn">i</button>
+<div id="info-panel">
+  <div id="info-content">
+    <h2>Axis.Lock</h2>
+    The three imaginary components of a quaternion — i, j, k — are the building blocks of 3D rotation. Here each component drives its own oscillator: i produces a sine wave at 264 Hz (C4), j a sine at 330 Hz (E4), k a sine at 396 Hz (G4) — forming a just-intonation major triad. By toggling axes, you hear how each dimension of rotation contributes to the full harmonic structure. The continuously rotating quaternion modulates each oscillator's amplitude — when a component is near zero, its tone fades; when near ±1, it's loudest. Mouse height controls rotation speed.
+  </div>
+</div>
+<div id="controls">
+  <button class="axis-btn active" data-axis="i">i</button>
+  <button class="axis-btn active" data-axis="j">j</button>
+  <button class="axis-btn active" data-axis="k">k</button>
+</div>
+<div id="title-bar">axis.lock — v10</div>
+<div id="speed-label">speed: 1.0×</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function(){
+  'use strict';
+
+  let audioCtx, masterGain;
+  let scene, camera, renderer;
+  let started = false;
+  let time = 0;
+  let rotSpeed = 1;
+  let mouseY = 0.5;
+
+  const axisState = { i: true, j: true, k: true };
+  const oscillators = {};
+  const oscGains = {};
+  const FREQS = { i: 264, j: 330, k: 396 };
+  const stutterOscs = {};
+  const stutterGains = {};
+  let stutterLFO, stutterLFOGain;
+
+  // Quaternion rotation state
+  let quatAngle = 0;
+  const rotAxis = new THREE.Vector3(1, 1, 1).normalize();
+  const currentQuat = new THREE.Quaternion();
+
+  // Visual elements
+  let axisLines = {};
+  let tracePoints = [];
+  let traceLine;
+  const MAX_TRACE = 500;
+
+  function initAudio(){
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    masterGain = audioCtx.createGain();
+    masterGain.gain.value = 0.25;
+
+    const compressor = audioCtx.createDynamicsCompressor();
+    compressor.threshold.value = -18;
+    compressor.ratio.value = 4;
+    masterGain.connect(compressor);
+    compressor.connect(audioCtx.destination);
+
+    ['i','j','k'].forEach(axis => {
+      const osc = audioCtx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.value = FREQS[axis];
+      const gain = audioCtx.createGain();
+      gain.gain.value = 0;
+      osc.connect(gain);
+      gain.connect(masterGain);
+      osc.start();
+      oscillators[axis] = osc;
+      oscGains[axis] = gain;
+    });
+
+    // Stutter oscillator bank: each axis (i,j,k) has its own frequency band
+    // i: lower high band, j: mid high band, k: upper high band
+    stutterLFO = audioCtx.createOscillator();
+    stutterLFO.type = 'square';
+    stutterLFO.frequency.value = 8;
+    stutterLFOGain = audioCtx.createGain();
+    stutterLFOGain.gain.value = 0;
+    stutterLFO.connect(stutterLFOGain);
+    stutterLFO.start();
+
+    const stutterBands = {
+      i: [3000, 3800],
+      j: [4900, 5700],
+      k: [6800, 7600]
+    };
+    ['i','j','k'].forEach(axis => {
+      const oscs = [];
+      const gains = [];
+      stutterBands[axis].forEach(freq => {
+        const o = audioCtx.createOscillator();
+        o.type = 'sine';
+        o.frequency.value = freq;
+        const g = audioCtx.createGain();
+        g.gain.value = 0;
+        o.connect(g);
+        stutterLFOGain.connect(g.gain);
+        g.connect(masterGain);
+        o.start();
+        oscs.push(o);
+        gains.push(g);
+      });
+      stutterOscs[axis] = oscs;
+      stutterGains[axis] = gains;
+    });
+  }
+
+  function initScene(){
+    scene = new THREE.Scene();
+    camera = new THREE.PerspectiveCamera(50, window.innerWidth/window.innerHeight, 0.1, 100);
+    camera.position.set(3, 2.5, 3);
+    camera.lookAt(0, 0, 0);
+
+    renderer = new THREE.WebGLRenderer({antialias: true, alpha: false});
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setClearColor(0x000000);
+    document.body.appendChild(renderer.domElement);
+
+    // Create axis lines
+    createAxisLines();
+
+    // Create trace line
+    const traceGeom = new THREE.BufferGeometry();
+    const positions = new Float32Array(MAX_TRACE * 3);
+    traceGeom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    traceGeom.setDrawRange(0, 0);
+    const traceMat = new THREE.LineBasicMaterial({color: 0xffffff, transparent: true, opacity: 0.5});
+    traceLine = new THREE.Line(traceGeom, traceMat);
+    scene.add(traceLine);
+  }
+
+  function createAxisLines(){
+    const axisLength = 2;
+    const axisConfig = {
+      i: {dir: new THREE.Vector3(1,0,0)},
+      j: {dir: new THREE.Vector3(0,1,0)},
+      k: {dir: new THREE.Vector3(0,0,1)}
+    };
+
+    ['i','j','k'].forEach(axis => {
+      const dir = axisConfig[axis].dir;
+
+      // Solid line
+      const points = [
+        dir.clone().multiplyScalar(-axisLength),
+        dir.clone().multiplyScalar(axisLength)
+      ];
+      const geom = new THREE.BufferGeometry().setFromPoints(points);
+      const mat = new THREE.LineBasicMaterial({color: 0xffffff, transparent: true, opacity: 1});
+      const line = new THREE.Line(geom, mat);
+      scene.add(line);
+
+      // Axis label at tip
+      axisLines[axis] = {line, mat, dir};
+    });
+
+    // Dim grid lines for reference
+    const gridMat = new THREE.LineBasicMaterial({color: 0x222222});
+    for(let i = -2; i <= 2; i++){
+      if(i === 0) continue;
+      // XZ grid
+      let pts = [new THREE.Vector3(i, 0, -2), new THREE.Vector3(i, 0, 2)];
+      scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), gridMat));
+      pts = [new THREE.Vector3(-2, 0, i), new THREE.Vector3(2, 0, i)];
+      scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), gridMat));
+    }
+  }
+
+  function addTracePoint(x, y, z){
+    tracePoints.push(x, y, z);
+    if(tracePoints.length > MAX_TRACE * 3){
+      tracePoints.splice(0, 3);
+    }
+    const positions = traceLine.geometry.attributes.position.array;
+    for(let i = 0; i < tracePoints.length; i++){
+      positions[i] = tracePoints[i];
+    }
+    traceLine.geometry.attributes.position.needsUpdate = true;
+    traceLine.geometry.setDrawRange(0, tracePoints.length / 3);
+  }
+
+  function animate(){
+    requestAnimationFrame(animate);
+    const dt = 1/60;
+    time += dt;
+
+    // Update rotation speed from mouse
+    rotSpeed = 0.1 + mouseY * 4;
+    document.getElementById('speed-label').textContent = 'speed: ' + rotSpeed.toFixed(1) + '×';
+
+    // Evolve quaternion
+    quatAngle += dt * rotSpeed;
+    // Use a wandering rotation axis for interest
+    const wobbleAxis = new THREE.Vector3(
+      Math.sin(time * 0.3) * 0.5 + 0.5,
+      Math.cos(time * 0.2) * 0.5 + 0.5,
+      Math.sin(time * 0.17 + 1) * 0.5 + 0.5
+    ).normalize();
+    currentQuat.setFromAxisAngle(wobbleAxis, quatAngle);
+
+    // Extract components
+    const qi = currentQuat.x;
+    const qj = currentQuat.y;
+    const qk = currentQuat.z;
+
+    // Update audio
+    if(audioCtx){
+      const components = {i: qi, j: qj, k: qk};
+      ['i','j','k'].forEach(axis => {
+        const targetVol = axisState[axis] ? Math.abs(components[axis]) * 0.35 : 0;
+        oscGains[axis].gain.setTargetAtTime(targetVol, audioCtx.currentTime, 0.05);
+      });
+
+      // Stutter: mouse Y (rotation speed) controls LFO rate (8-40 Hz)
+      if(stutterLFO){
+        const stutterRate = 8 + mouseY * 32;
+        stutterLFO.frequency.setTargetAtTime(stutterRate, audioCtx.currentTime, 0.05);
+        // Each axis band activates when its axis is toggled on
+        const activeCount = (axisState.i ? 1 : 0) + (axisState.j ? 1 : 0) + (axisState.k ? 1 : 0);
+        const stutterAmp = activeCount > 0 ? 0.02 + activeCount * 0.01 : 0; // 0.03-0.05 range
+        stutterLFOGain.gain.setTargetAtTime(Math.min(stutterAmp, 0.05), audioCtx.currentTime, 0.05);
+        ['i','j','k'].forEach(axis => {
+          const vol = axisState[axis] ? 1 : 0;
+          if(stutterGains[axis]){
+            stutterGains[axis].forEach(g => {
+              g.gain.setTargetAtTime(vol, audioCtx.currentTime, 0.08);
+            });
+          }
+        });
+      }
+    }
+
+    // Update visual axis opacity
+    ['i','j','k'].forEach(axis => {
+      const active = axisState[axis];
+      axisLines[axis].mat.opacity = active ? 0.9 : 0.12;
+    });
+
+    // Rotate axis group by current quaternion for visual feedback
+    ['i','j','k'].forEach(axis => {
+      const line = axisLines[axis].line;
+      line.quaternion.copy(currentQuat);
+    });
+
+    // Add trace point (position on unit sphere from quaternion imaginary part)
+    const traceScale = 1.5;
+    addTracePoint(qi * traceScale, qj * traceScale, qk * traceScale);
+
+    // Slowly rotate camera
+    const camDist = 4.5;
+    const camAngle = time * 0.08;
+    camera.position.set(
+      Math.sin(camAngle) * camDist,
+      2 + Math.sin(time * 0.05) * 0.5,
+      Math.cos(camAngle) * camDist
+    );
+    camera.lookAt(0, 0, 0);
+
+    renderer.render(scene, camera);
+  }
+
+  function begin(){
+    if(started) return;
+    started = true;
+    document.getElementById('overlay').classList.add('hidden');
+    initAudio();
+    initScene();
+    animate();
+  }
+
+  // Events
+  document.getElementById('overlay').addEventListener('pointerdown', function(e){
+    e.preventDefault();
+    begin();
+  });
+
+  document.querySelectorAll('.axis-btn').forEach(btn => {
+    btn.addEventListener('pointerdown', function(e){
+      e.stopPropagation();
+      if(!started) return;
+      const axis = this.dataset.axis;
+      axisState[axis] = !axisState[axis];
+      this.classList.toggle('active', axisState[axis]);
+    });
+  });
+
+  document.getElementById('info-btn').addEventListener('pointerdown', function(e){
+    e.stopPropagation();
+    document.getElementById('info-panel').classList.toggle('visible');
+  });
+
+  document.getElementById('info-panel').addEventListener('pointerdown', function(e){
+    e.stopPropagation();
+    document.getElementById('info-panel').classList.remove('visible');
+  });
+
+  window.addEventListener('pointermove', function(e){
+    mouseY = 1 - (e.clientY / window.innerHeight);
+  });
+
+  window.addEventListener('resize', function(){
+    if(!renderer) return;
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+  });
+})();
+</script>
+</body>
+</html>

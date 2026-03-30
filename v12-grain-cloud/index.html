@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GRAIN.CLOUD — Quaternion Granular Synthesis v12</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#000;overflow:hidden;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;color:#fff;touch-action:none}
+canvas{display:block}
+#overlay{position:fixed;top:0;left:0;width:100%;height:100%;display:flex;align-items:center;justify-content:center;z-index:20;background:#000;cursor:pointer}
+#overlay.hidden{opacity:0;pointer-events:none;transition:opacity 0.8s}
+#overlay-text{text-align:center}
+#overlay-text h1{font-size:18px;font-weight:300;letter-spacing:0.4em;text-transform:uppercase;margin-bottom:10px}
+#overlay-text p{font-size:11px;font-weight:300;color:#888;letter-spacing:0.3em}
+#info-btn{position:fixed;top:16px;left:16px;width:32px;height:32px;border-radius:50%;border:1px solid #555;background:transparent;color:#888;font-size:14px;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;cursor:pointer;z-index:15;display:flex;align-items:center;justify-content:center;transition:border-color 0.3s,color 0.3s}
+#info-btn:hover{border-color:#fff;color:#fff}
+#info-panel{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.92);z-index:14;display:none;align-items:center;justify-content:center;padding:40px}
+#info-panel.visible{display:flex}
+#info-content{max-width:560px;font-size:13px;line-height:1.8;color:#ccc;font-weight:300;letter-spacing:0.02em}
+#info-content h2{font-size:15px;font-weight:400;letter-spacing:0.3em;text-transform:uppercase;color:#fff;margin-bottom:16px}
+#title-bar{position:fixed;top:16px;left:60px;font-size:10px;letter-spacing:0.3em;text-transform:uppercase;color:#333;z-index:10}
+#stats{position:fixed;bottom:16px;right:16px;font-size:9px;letter-spacing:0.15em;color:#333;z-index:10;text-align:right;white-space:pre}
+</style>
+</head>
+<body>
+<div id="overlay">
+  <div id="overlay-text">
+    <h1>grain.cloud</h1>
+    <p>click to begin</p>
+  </div>
+</div>
+<button id="info-btn">i</button>
+<div id="info-panel">
+  <div id="info-content">
+    <h2>grain.cloud</h2>
+    Granular synthesis deconstructs sound into tiny particles called 'grains' — each 20–80ms long. Your mouse position is mapped to a quaternion using spherical coordinates, then the quaternion's four components determine each grain's properties: w sets duration (20–80ms), x sets frequency (200–2000 Hz), y sets stereo pan (−1 to +1), and z sets amplitude envelope shape. Moving the mouse faster spawns more grains per second (up to 60/s). The 3D visualization places each grain at its quaternion's stereographic projection point — you're seeing the sound in quaternion space.
+  </div>
+</div>
+<div id="title-bar">GRAIN.CLOUD — quaternion granular synthesis</div>
+<div id="stats"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function(){
+  'use strict';
+
+  var audioCtx, masterGain;
+  var scene, camera, renderer;
+  var started = false;
+  var mouseX = 0, mouseY = 0, prevMouseX = 0, prevMouseY = 0;
+  var mouseSpeed = 0;
+  var grainTimer = 0;
+  var totalGrains = 0;
+
+  var MAX_PARTICLES = 2000;
+  var particles = [];
+  var particleGeometry, particleMaterial, particleSystem;
+  var trailGeometry, trailMaterial, trailLine;
+  var trailPoints = [];
+  var MAX_TRAIL = 300;
+
+  function initAudio() {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    masterGain = audioCtx.createGain();
+    masterGain.gain.value = 0.3;
+    masterGain.connect(audioCtx.destination);
+  }
+
+  function mouseToQuaternion(mx, my) {
+    var theta = mx * Math.PI;
+    var phi = my * Math.PI * 0.5;
+    var halfTheta = theta * 0.5;
+    var halfPhi = phi * 0.5;
+    var w = Math.cos(halfTheta) * Math.cos(halfPhi);
+    var x = Math.sin(halfTheta) * Math.cos(halfPhi);
+    var y = Math.cos(halfTheta) * Math.sin(halfPhi);
+    var z = Math.sin(halfTheta) * Math.sin(halfPhi);
+    var len = Math.sqrt(w*w + x*x + y*y + z*z);
+    return { w: w/len, x: x/len, y: y/len, z: z/len };
+  }
+
+  function stereographicProject(q) {
+    var denom = 1 - q.w;
+    if (Math.abs(denom) < 0.001) denom = 0.001;
+    return { x: q.x / denom, y: q.y / denom, z: q.z / denom };
+  }
+
+  function spawnGrain(q) {
+    var now = audioCtx.currentTime;
+    var duration = 0.02 + Math.abs(q.w) * 0.06;
+    var frequency = 200 + (q.x + 1) * 0.5 * 1800;
+    var pan = Math.max(-1, Math.min(1, q.y));
+    var envShape = (q.z + 1) * 0.5;
+
+    var osc = audioCtx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.value = frequency;
+
+    var gainNode = audioCtx.createGain();
+    gainNode.gain.value = 0;
+
+    var panner = audioCtx.createStereoPanner();
+    panner.pan.value = pan;
+
+    osc.connect(gainNode);
+    gainNode.connect(panner);
+    panner.connect(masterGain);
+
+    var attack = duration * (0.1 + envShape * 0.4);
+    var release = duration - attack;
+    gainNode.gain.setValueAtTime(0, now);
+    gainNode.gain.linearRampToValueAtTime(0.15, now + attack);
+    gainNode.gain.linearRampToValueAtTime(0, now + attack + release);
+
+    osc.start(now);
+    osc.stop(now + duration + 0.01);
+    osc.onended = function() { osc.disconnect(); gainNode.disconnect(); panner.disconnect(); };
+
+    var pos = stereographicProject(q);
+    var scale = 3;
+    particles.push({
+      x: pos.x * scale,
+      y: pos.y * scale,
+      z: pos.z * scale,
+      life: 1.0,
+      decay: 0.3 + Math.random() * 0.7
+    });
+    if (particles.length > MAX_PARTICLES) {
+      particles.splice(0, particles.length - MAX_PARTICLES);
+    }
+
+    trailPoints.push(new THREE.Vector3(pos.x * scale, pos.y * scale, pos.z * scale));
+    if (trailPoints.length > MAX_TRAIL) {
+      trailPoints.shift();
+    }
+
+    totalGrains++;
+  }
+
+  function spawnStutterGrain(q) {
+    // High-pitch micro-grain: 5000-8000 Hz, 5-15ms, rapid stutter texture
+    var now = audioCtx.currentTime;
+    var freq = 5000 + Math.random() * 3000;
+    var duration = 0.005 + Math.random() * 0.010; // 5-15ms
+    var pan = Math.max(-1, Math.min(1, q.y + (Math.random() - 0.5) * 0.4));
+    var vol = 0.02 + Math.random() * 0.03; // 0.02-0.05
+
+    var osc = audioCtx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.value = freq;
+
+    var gainNode = audioCtx.createGain();
+    var panner = audioCtx.createStereoPanner();
+    panner.pan.value = pan;
+
+    osc.connect(gainNode);
+    gainNode.connect(panner);
+    panner.connect(masterGain);
+
+    // Very short attack/release envelope
+    var attack = duration * 0.15;
+    var release = duration * 0.85;
+    gainNode.gain.setValueAtTime(0, now);
+    gainNode.gain.linearRampToValueAtTime(vol, now + attack);
+    gainNode.gain.linearRampToValueAtTime(0, now + attack + release);
+
+    osc.start(now);
+    osc.stop(now + duration + 0.002);
+    osc.onended = function() { osc.disconnect(); gainNode.disconnect(); panner.disconnect(); };
+
+    // Add tiny particle for visual feedback
+    var pos = stereographicProject(q);
+    var scale = 3;
+    particles.push({
+      x: pos.x * scale + (Math.random() - 0.5) * 0.3,
+      y: pos.y * scale + (Math.random() - 0.5) * 0.3,
+      z: pos.z * scale + (Math.random() - 0.5) * 0.3,
+      life: 0.4,
+      decay: 2.0 + Math.random() * 2.0
+    });
+    if (particles.length > MAX_PARTICLES) {
+      particles.splice(0, particles.length - MAX_PARTICLES);
+    }
+    totalGrains++;
+  }
+
+  function initThree() {
+    scene = new THREE.Scene();
+    camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 100);
+    camera.position.set(0, 0, 8);
+    camera.lookAt(0, 0, 0);
+
+    renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setClearColor(0x000000, 1);
+    document.body.appendChild(renderer.domElement);
+
+    particleGeometry = new THREE.BufferGeometry();
+    var positions = new Float32Array(MAX_PARTICLES * 3);
+    var alphas = new Float32Array(MAX_PARTICLES);
+    particleGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    particleGeometry.setAttribute('alpha', new THREE.BufferAttribute(alphas, 1));
+
+    particleMaterial = new THREE.ShaderMaterial({
+      uniforms: { size: { value: 3.0 * window.devicePixelRatio } },
+      vertexShader: [
+        'attribute float alpha;',
+        'varying float vAlpha;',
+        'uniform float size;',
+        'void main(){',
+        '  vAlpha = alpha;',
+        '  vec4 mv = modelViewMatrix * vec4(position, 1.0);',
+        '  gl_PointSize = size * (300.0 / -mv.z);',
+        '  gl_Position = projectionMatrix * mv;',
+        '}'
+      ].join('\n'),
+      fragmentShader: [
+        'varying float vAlpha;',
+        'void main(){',
+        '  float d = length(gl_PointCoord - vec2(0.5));',
+        '  if(d > 0.5) discard;',
+        '  float a = smoothstep(0.5, 0.2, d) * vAlpha;',
+        '  gl_FragColor = vec4(1.0, 1.0, 1.0, a);',
+        '}'
+      ].join('\n'),
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending
+    });
+
+    particleSystem = new THREE.Points(particleGeometry, particleMaterial);
+    scene.add(particleSystem);
+
+    trailGeometry = new THREE.BufferGeometry();
+    trailMaterial = new THREE.LineBasicMaterial({ color: 0x333333, transparent: true, opacity: 0.4 });
+    trailLine = new THREE.Line(trailGeometry, trailMaterial);
+    scene.add(trailLine);
+  }
+
+  function updateParticles(dt) {
+    var posAttr = particleGeometry.getAttribute('position');
+    var alphaAttr = particleGeometry.getAttribute('alpha');
+    var posArr = posAttr.array;
+    var alphaArr = alphaAttr.array;
+
+    for (var i = 0; i < posArr.length; i++) posArr[i] = 0;
+    for (var i = 0; i < alphaArr.length; i++) alphaArr[i] = 0;
+
+    var alive = 0;
+    for (var i = particles.length - 1; i >= 0; i--) {
+      var p = particles[i];
+      p.life -= dt * p.decay;
+      if (p.life <= 0) {
+        particles.splice(i, 1);
+        continue;
+      }
+      if (alive < MAX_PARTICLES) {
+        posArr[alive * 3] = p.x;
+        posArr[alive * 3 + 1] = p.y;
+        posArr[alive * 3 + 2] = p.z;
+        alphaArr[alive] = p.life;
+        alive++;
+      }
+    }
+
+    particleGeometry.setDrawRange(0, alive);
+    posAttr.needsUpdate = true;
+    alphaAttr.needsUpdate = true;
+
+    if (trailPoints.length > 1) {
+      trailGeometry.setFromPoints(trailPoints);
+    }
+  }
+
+  var lastTime = 0;
+  function animate(timestamp) {
+    requestAnimationFrame(animate);
+    var dt = Math.min((timestamp - lastTime) / 1000, 0.05);
+    lastTime = timestamp;
+
+    if (!started) return;
+
+    var dx = mouseX - prevMouseX;
+    var dy = mouseY - prevMouseY;
+    mouseSpeed = Math.sqrt(dx * dx + dy * dy);
+    prevMouseX = mouseX;
+    prevMouseY = mouseY;
+
+    var grainsPerSec = 2 + mouseSpeed * 4000;
+    grainsPerSec = Math.min(grainsPerSec, 60);
+    var grainInterval = 1 / grainsPerSec;
+
+    grainTimer += dt;
+    var grainCount = 0;
+    while (grainTimer >= grainInterval && grainCount < 4) {
+      grainTimer -= grainInterval;
+      grainCount++;
+      var q = mouseToQuaternion(mouseX * 2 - 1, mouseY * 2 - 1);
+      q.w += (Math.random() - 0.5) * 0.1;
+      q.x += (Math.random() - 0.5) * 0.1;
+      q.y += (Math.random() - 0.5) * 0.1;
+      q.z += (Math.random() - 0.5) * 0.1;
+      var len = Math.sqrt(q.w*q.w + q.x*q.x + q.y*q.y + q.z*q.z);
+      q.w /= len; q.x /= len; q.y /= len; q.z /= len;
+      spawnGrain(q);
+    }
+    if (grainTimer > grainInterval) grainTimer = 0;
+
+    // Stutter micro-grains: spawn when mouse moves fast
+    var stutterThreshold = 0.005;
+    if (mouseSpeed > stutterThreshold) {
+      var stutterIntensity = Math.min(1, (mouseSpeed - stutterThreshold) / 0.03);
+      var stutterCount = Math.floor(1 + stutterIntensity * 4); // 1-5 stutter grains per frame
+      for (var si = 0; si < stutterCount; si++) {
+        var sq = mouseToQuaternion(mouseX * 2 - 1, mouseY * 2 - 1);
+        sq.w += (Math.random() - 0.5) * 0.2;
+        sq.x += (Math.random() - 0.5) * 0.2;
+        sq.y += (Math.random() - 0.5) * 0.2;
+        sq.z += (Math.random() - 0.5) * 0.2;
+        var slen = Math.sqrt(sq.w*sq.w + sq.x*sq.x + sq.y*sq.y + sq.z*sq.z);
+        sq.w /= slen; sq.x /= slen; sq.y /= slen; sq.z /= slen;
+        spawnStutterGrain(sq);
+      }
+    }
+
+    updateParticles(dt);
+
+    camera.position.x = Math.sin(timestamp * 0.0001) * 2;
+    camera.position.y = Math.cos(timestamp * 0.00013) * 1.5;
+    camera.lookAt(0, 0, 0);
+
+    renderer.render(scene, camera);
+
+    document.getElementById('stats').textContent =
+      'grains: ' + particles.length + ' / total: ' + totalGrains +
+      '\ndensity: ' + Math.round(grainsPerSec) + '/s';
+  }
+
+  function onPointerMove(e) {
+    var x, y;
+    if (e.touches) {
+      x = e.touches[0].clientX;
+      y = e.touches[0].clientY;
+    } else {
+      x = e.clientX;
+      y = e.clientY;
+    }
+    mouseX = x / window.innerWidth;
+    mouseY = y / window.innerHeight;
+  }
+
+  function start() {
+    if (started) return;
+    started = true;
+    initAudio();
+    document.getElementById('overlay').classList.add('hidden');
+  }
+
+  document.getElementById('overlay').addEventListener('pointerdown', start);
+
+  document.getElementById('info-btn').addEventListener('pointerdown', function(e) {
+    e.stopPropagation();
+    document.getElementById('info-panel').classList.toggle('visible');
+  });
+  document.getElementById('info-panel').addEventListener('pointerdown', function() {
+    this.classList.remove('visible');
+  });
+
+  window.addEventListener('pointermove', onPointerMove);
+  window.addEventListener('touchmove', function(e) { e.preventDefault(); onPointerMove(e); }, { passive: false });
+
+  window.addEventListener('resize', function() {
+    if (renderer) {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+  });
+
+  initThree();
+  requestAnimationFrame(animate);
+
+})();
+</script>
+</body>
+</html>

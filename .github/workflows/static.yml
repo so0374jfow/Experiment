@@ -2,20 +2,15 @@
 name: Deploy static content to Pages
 
 on:
-  # Runs on pushes targeting the default branch
   push:
-    branches: ["main"]
-
-  # Allows you to run this workflow manually from the Actions tab
+    branches: ["main", "claude/add-claude-documentation-eifla"]
   workflow_dispatch:
 
-# Sets permissions of the GITHUB_TOKEN used by Actions
 permissions:
   contents: read
   pages: write
   id-token: write
 
-# Allow only one concurrent deployment
 concurrency:
   group: "pages"
   cancel-in-progress: false

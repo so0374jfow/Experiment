@@ -6,19 +6,19 @@
 <title>HAMILTON'S BRIDGE — Quaternion Sound Synthesis v3</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{background:#000;overflow:hidden;font-family:'Courier New',monospace;color:#fff}
+body{background:#000;overflow:hidden;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;color:#fff}
 canvas{display:block}
 #overlay{position:fixed;top:0;left:0;width:100%;height:100%;display:flex;align-items:center;justify-content:center;z-index:10;background:#000;cursor:pointer;transition:opacity 2s}
 #overlay.hidden{opacity:0;pointer-events:none}
 #overlay-text{text-align:center;letter-spacing:0.2em}
-#overlay-text h1{font-size:14px;font-weight:300;margin-bottom:8px;color:#da8}
-#overlay-text p{font-size:10px;font-weight:300;color:#543;letter-spacing:0.5em}
-#overlay-text .eq{font-size:11px;color:#a86;margin-top:16px;letter-spacing:0.1em}
-#info{position:fixed;bottom:12px;left:12px;font-size:9px;color:#332;letter-spacing:0.2em;z-index:5;opacity:0;transition:opacity 3s}
+#overlay-text h1{font-size:14px;font-weight:300;margin-bottom:8px;color:#fff}
+#overlay-text p{font-size:10px;font-weight:300;color:#555;letter-spacing:0.5em}
+#overlay-text .eq{font-size:11px;color:#888;margin-top:16px;letter-spacing:0.1em}
+#info{position:fixed;bottom:12px;left:12px;font-size:9px;color:#333;letter-spacing:0.2em;z-index:5;opacity:0;transition:opacity 3s}
 #info.visible{opacity:1}
-#algebra{position:fixed;top:12px;left:12px;font-size:9px;color:#3a2a10;letter-spacing:0.1em;z-index:5;opacity:0;transition:opacity 3s;line-height:1.8}
+#algebra{position:fixed;top:12px;left:12px;font-size:9px;color:#333;letter-spacing:0.1em;z-index:5;opacity:0;transition:opacity 3s;line-height:1.8}
 #algebra.visible{opacity:1}
-#qdata{position:fixed;top:12px;right:12px;font-size:8px;color:#2a2010;letter-spacing:0.1em;z-index:5;text-align:right;opacity:0;transition:opacity 3s;line-height:1.6}
+#qdata{position:fixed;top:12px;right:12px;font-size:8px;color:#333;letter-spacing:0.1em;z-index:5;text-align:right;opacity:0;transition:opacity 3s;line-height:1.6}
 #qdata.visible{opacity:1}
 </style>
 </head>
@@ -136,7 +136,7 @@ canvas{display:block}
     // Unit sphere wireframe
     const sphereGeo = new THREE.SphereGeometry(2, 32, 32);
     const sphereMat = new THREE.MeshBasicMaterial({
-      color: 0x332200,
+      color: 0x333333,
       wireframe: true,
       transparent: true,
       opacity: 0.08
@@ -154,9 +154,9 @@ canvas{display:block}
       const mat = new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.3 });
       return new THREE.Line(geo, mat);
     }
-    axisI = createAxis(0xff4444, new THREE.Vector3(1, 0, 0));
-    axisJ = createAxis(0x44ff44, new THREE.Vector3(0, 1, 0));
-    axisK = createAxis(0x4444ff, new THREE.Vector3(0, 0, 1));
+    axisI = createAxis(0xffffff, new THREE.Vector3(1, 0, 0));
+    axisJ = createAxis(0x999999, new THREE.Vector3(0, 1, 0));
+    axisK = createAxis(0x666666, new THREE.Vector3(0, 0, 1));
     scene.add(axisI, axisJ, axisK);
 
     // Trail lines for each basis vector tracing paths on sphere
@@ -170,9 +170,9 @@ canvas{display:block}
       scene.add(line);
       return line;
     }
-    trailMeshI = createTrailLine(0xff6633);
-    trailMeshJ = createTrailLine(0x33ff66);
-    trailMeshK = createTrailLine(0x6633ff);
+    trailMeshI = createTrailLine(0xffffff);
+    trailMeshJ = createTrailLine(0x999999);
+    trailMeshK = createTrailLine(0x666666);
 
     // Hopf fibration circles — great circles on the sphere
     for (let i = 0; i < 12; i++) {

@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PHASE.MIRROR — Quaternion Sound Synthesis v11</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#000;overflow:hidden;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;color:#fff;touch-action:none}
+canvas{display:block}
+#overlay{position:fixed;top:0;left:0;width:100%;height:100%;display:flex;align-items:center;justify-content:center;z-index:20;background:#000;cursor:pointer}
+#overlay.hidden{opacity:0;pointer-events:none;transition:opacity 1s}
+#overlay-text{text-align:center;letter-spacing:0.3em;text-transform:uppercase}
+#overlay-text h1{font-size:16px;font-weight:300;margin-bottom:10px;color:#fff}
+#overlay-text p{font-size:10px;font-weight:300;color:#888;letter-spacing:0.5em}
+#info-btn{position:fixed;top:16px;left:16px;width:32px;height:32px;border-radius:50%;border:1px solid #555;background:transparent;color:#888;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:14px;font-style:italic;cursor:pointer;z-index:15;display:flex;align-items:center;justify-content:center;transition:border-color 0.3s,color 0.3s}
+#info-btn:hover{border-color:#fff;color:#fff}
+#info-panel{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.88);z-index:14;display:none;align-items:center;justify-content:center;padding:40px}
+#info-panel.visible{display:flex}
+#info-content{max-width:520px;font-size:13px;line-height:1.7;color:#ccc;font-weight:300;letter-spacing:0.02em}
+#info-content h2{font-size:12px;font-weight:400;letter-spacing:0.3em;text-transform:uppercase;color:#fff;margin-bottom:16px}
+#title-bar{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);font-size:9px;letter-spacing:0.4em;text-transform:uppercase;color:#333;z-index:5}
+</style>
+</head>
+<body>
+<div id="overlay">
+  <div id="overlay-text">
+    <h1>phase.mirror</h1>
+    <p>click to begin</p>
+  </div>
+</div>
+<button id="info-btn">i</button>
+<div id="info-panel">
+  <div id="info-content">
+    <h2>Phase.Mirror</h2>
+    Two independent quaternion fields occupy each half of the screen. Your mouse position on either side sets that side's quaternion via axis-angle mapping. Each quaternion drives two oscillators whose frequencies are derived from the quaternion's Euler angle decomposition. The central line represents the 'commutator' — the mathematical difference between q_left × q_right and q_right × q_left. When both sides converge to similar rotations, the commutator approaches zero and a pure harmonic tone emerges. Maximum divergence produces maximum dissonance.
+  </div>
+</div>
+<div id="title-bar">phase.mirror — v11</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function(){
+  'use strict';
+
+  let audioCtx, masterGain;
+  let scene, camera, renderer;
+  let started = false;
+  let time = 0;
+
+  // Mouse state
+  let mouseX = 0.5, mouseY = 0.5;
+  let pointerSide = null; // 'left' or 'right'
+
+  // Quaternions for each side
+  const quatLeft = new THREE.Quaternion();
+  const quatRight = new THREE.Quaternion();
+  let leftNormX = 0.5, leftNormY = 0.5;
+  let rightNormX = 0.5, rightNormY = 0.5;
+
+  // Audio nodes
+  let oscLeftA, oscLeftB, oscRightA, oscRightB, oscCenter;
+  let gainLeftA, gainLeftB, gainRightA, gainRightB, gainCenter;
+
+  // Stutter oscillator bank
+  const STUTTER_COUNT = 4;
+  let stutterOscs = [], stutterGains = [], stutterLFO, stutterLFOGain;
+
+  // Visual elements
+  const PARTICLE_COUNT = 120;
+  let leftParticles, rightParticles;
+  let centerLine, centerLineMat;
+  let centerGlowLines = [];
+
+  function quatFromPosition(nx, ny){
+    // Map normalized position to axis-angle quaternion
+    // nx: 0-1 horizontal, ny: 0-1 vertical
+    const theta = (nx - 0.5) * Math.PI * 2;
+    const phi = (ny - 0.5) * Math.PI;
+    const axis = new THREE.Vector3(
+      Math.sin(theta) * Math.cos(phi),
+      Math.sin(phi),
+      Math.cos(theta) * Math.cos(phi)
+    ).normalize();
+    const angle = Math.sqrt((nx - 0.5) * (nx - 0.5) + (ny - 0.5) * (ny - 0.5)) * Math.PI * 2;
+    const q = new THREE.Quaternion();
+    q.setFromAxisAngle(axis, angle);
+    return q;
+  }
+
+  function quatToEulerFreqs(q){
+    // Extract Euler angles and map to frequencies
+    const euler = new THREE.Euler();
+    euler.setFromQuaternion(q, 'XYZ');
+    // Map angles (-PI..PI) to frequency ranges
+    const f1 = 130 + (euler.x + Math.PI) / (2 * Math.PI) * 400; // 130-530 Hz
+    const f2 = 180 + (euler.y + Math.PI) / (2 * Math.PI) * 300; // 180-480 Hz
+    return { f1, f2 };
+  }
+
+  function quatCommutatorMagnitude(a, b){
+    // Commutator: a*b - b*a (as quaternions, measure the difference)
+    const ab = new THREE.Quaternion().multiplyQuaternions(a, b);
+    const ba = new THREE.Quaternion().multiplyQuaternions(b, a);
+    // Difference magnitude
+    const dx = ab.x - ba.x;
+    const dy = ab.y - ba.y;
+    const dz = ab.z - ba.z;
+    const dw = ab.w - ba.w;
+    return Math.sqrt(dx*dx + dy*dy + dz*dz + dw*dw);
+  }
+
+  function quatDistance(a, b){
+    // Geodesic distance between quaternions
+    const dot = Math.abs(a.x*b.x + a.y*b.y + a.z*b.z + a.w*b.w);
+    return 1 - Math.min(1, dot);
+  }
+
+  function initAudio(){
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    masterGain = audioCtx.createGain();
+    masterGain.gain.value = 0.2;
+
+    const compressor = audioCtx.createDynamicsCompressor();
+    compressor.threshold.value = -18;
+    compressor.ratio.value = 5;
+    masterGain.connect(compressor);
+    compressor.connect(audioCtx.destination);
+
+    // Left side oscillators
+    oscLeftA = audioCtx.createOscillator();
+    oscLeftA.type = 'sine';
+    oscLeftA.frequency.value = 220;
+    gainLeftA = audioCtx.createGain();
+    gainLeftA.gain.value = 0;
+    oscLeftA.connect(gainLeftA);
+    gainLeftA.connect(masterGain);
+    oscLeftA.start();
+
+    oscLeftB = audioCtx.createOscillator();
+    oscLeftB.type = 'sine';
+    oscLeftB.frequency.value = 330;
+    gainLeftB = audioCtx.createGain();
+    gainLeftB.gain.value = 0;
+    oscLeftB.connect(gainLeftB);
+    gainLeftB.connect(masterGain);
+    oscLeftB.start();
+
+    // Right side oscillators
+    oscRightA = audioCtx.createOscillator();
+    oscRightA.type = 'sine';
+    oscRightA.frequency.value = 220;
+    gainRightA = audioCtx.createGain();
+    gainRightA.gain.value = 0;
+    oscRightA.connect(gainRightA);
+    gainRightA.connect(masterGain);
+    oscRightA.start();
+
+    oscRightB = audioCtx.createOscillator();
+    oscRightB.type = 'sine';
+    oscRightB.frequency.value = 330;
+    gainRightB = audioCtx.createGain();
+    gainRightB.gain.value = 0;
+    oscRightB.connect(gainRightB);
+    gainRightB.connect(masterGain);
+    oscRightB.start();
+
+    // Center resonant tone (emerges when quaternions converge)
+    oscCenter = audioCtx.createOscillator();
+    oscCenter.type = 'sine';
+    oscCenter.frequency.value = 264;
+    gainCenter = audioCtx.createGain();
+    gainCenter.gain.value = 0;
+    oscCenter.connect(gainCenter);
+    gainCenter.connect(masterGain);
+    oscCenter.start();
+
+    // Stutter oscillator bank — high-pitch sines gated by square-wave LFO
+    // Intensifies along center line when quaternion fields diverge
+    stutterLFO = audioCtx.createOscillator();
+    stutterLFO.type = 'square';
+    stutterLFO.frequency.value = 16;
+    stutterLFOGain = audioCtx.createGain();
+    stutterLFOGain.gain.value = 0; // controlled by commutator magnitude
+    stutterLFO.connect(stutterLFOGain);
+    stutterLFO.start();
+
+    const stutterFreqs = [3200, 4700, 6100, 7500];
+    for(let i = 0; i < STUTTER_COUNT; i++){
+      const osc = audioCtx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.value = stutterFreqs[i];
+      const gain = audioCtx.createGain();
+      gain.gain.value = 0;
+      osc.connect(gain);
+      // LFO modulates each stutter oscillator's output
+      stutterLFOGain.connect(gain.gain);
+      gain.connect(masterGain);
+      osc.start();
+      stutterOscs.push(osc);
+      stutterGains.push(gain);
+    }
+  }
+
+  function initScene(){
+    scene = new THREE.Scene();
+    const aspect = window.innerWidth / window.innerHeight;
+    const h = 5;
+    camera = new THREE.OrthographicCamera(-h * aspect, h * aspect, h, -h, 0.1, 10);
+    camera.position.z = 1;
+
+    renderer = new THREE.WebGLRenderer({antialias: true, alpha: false});
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setClearColor(0x000000);
+    document.body.appendChild(renderer.domElement);
+
+    // Center dividing line
+    const linePoints = [new THREE.Vector3(0, -h, 0), new THREE.Vector3(0, h, 0)];
+    const lineGeom = new THREE.BufferGeometry().setFromPoints(linePoints);
+    centerLineMat = new THREE.LineBasicMaterial({color: 0xffffff, transparent: true, opacity: 0.15});
+    centerLine = new THREE.Line(lineGeom, centerLineMat);
+    scene.add(centerLine);
+
+    // Center glow lines (multiple for glow effect)
+    for(let i = 0; i < 5; i++){
+      const offset = (i - 2) * 0.03;
+      const pts = [new THREE.Vector3(offset, -h, 0), new THREE.Vector3(offset, h, 0)];
+      const geom = new THREE.BufferGeometry().setFromPoints(pts);
+      const mat = new THREE.LineBasicMaterial({color: 0xffffff, transparent: true, opacity: 0});
+      const line = new THREE.Line(geom, mat);
+      scene.add(line);
+      centerGlowLines.push({line, mat});
+    }
+
+    // Create particles for left side
+    leftParticles = createParticles(-h * aspect * 0.5, PARTICLE_COUNT);
+    // Create particles for right side
+    rightParticles = createParticles(h * aspect * 0.5, PARTICLE_COUNT);
+  }
+
+  function createParticles(centerX, count){
+    const particles = [];
+    for(let i = 0; i < count; i++){
+      const geom = new THREE.CircleGeometry(0.03 + Math.random() * 0.03, 8);
+      const mat = new THREE.MeshBasicMaterial({color: 0xffffff, transparent: true, opacity: 0.6});
+      const mesh = new THREE.Mesh(geom, mat);
+      // Random initial position around center
+      const angle = Math.random() * Math.PI * 2;
+      const radius = Math.random() * 3;
+      mesh.position.set(
+        centerX + Math.cos(angle) * radius,
+        Math.sin(angle) * radius,
+        0
+      );
+      scene.add(mesh);
+      particles.push({
+        mesh, mat,
+        baseX: centerX,
+        baseY: 0,
+        angle: Math.random() * Math.PI * 2,
+        radius: 0.5 + Math.random() * 2.5,
+        speed: 0.3 + Math.random() * 0.7,
+        phase: Math.random() * Math.PI * 2
+      });
+    }
+    return particles;
+  }
+
+  function updateParticles(particles, quat, side, dt){
+    const aspect = window.innerWidth / window.innerHeight;
+    const h = 5;
+    const halfW = h * aspect;
+    // Extract rotation influence from quaternion
+    const euler = new THREE.Euler();
+    euler.setFromQuaternion(quat, 'XYZ');
+
+    for(let i = 0; i < particles.length; i++){
+      const p = particles[i];
+      p.angle += dt * p.speed * (1 + Math.abs(euler.x));
+      p.phase += dt * 0.5;
+
+      // Quaternion-influenced motion
+      const r = p.radius * (0.7 + 0.3 * Math.sin(p.phase + euler.y));
+      const a = p.angle + euler.z;
+
+      let targetX = p.baseX + Math.cos(a) * r;
+      let targetY = Math.sin(a + euler.x * 0.5) * r;
+
+      // Mirror symmetry: reflect across center
+      if(side === 'left'){
+        targetX = Math.min(targetX, -0.15);
+      } else {
+        targetX = Math.max(targetX, 0.15);
+      }
+
+      // Clamp to visible area
+      targetX = Math.max(-halfW, Math.min(halfW, targetX));
+      targetY = Math.max(-h, Math.min(h, targetY));
+
+      p.mesh.position.x += (targetX - p.mesh.position.x) * 0.05;
+      p.mesh.position.y += (targetY - p.mesh.position.y) * 0.05;
+
+      // Opacity based on quaternion magnitude
+      const dist = Math.sqrt(
+        (p.mesh.position.x - p.baseX) * (p.mesh.position.x - p.baseX) +
+        p.mesh.position.y * p.mesh.position.y
+      );
+      p.mat.opacity = 0.2 + 0.6 * Math.max(0, 1 - dist / 4);
+    }
+  }
+
+  function updateCamera(){
+    const aspect = window.innerWidth / window.innerHeight;
+    const h = 5;
+    camera.left = -h * aspect;
+    camera.right = h * aspect;
+    camera.top = h;
+    camera.bottom = -h;
+    camera.updateProjectionMatrix();
+  }
+
+  function animate(){
+    requestAnimationFrame(animate);
+    const dt = 1/60;
+    time += dt;
+
+    // Update quaternions from mouse positions
+    quatLeft.copy(quatFromPosition(leftNormX, leftNormY));
+    quatRight.copy(quatFromPosition(rightNormX, rightNormY));
+
+    // Slowly drift quaternions when mouse isn't on that side
+    const drift = time * 0.15;
+    if(pointerSide !== 'left'){
+      leftNormX = 0.5 + Math.sin(drift * 0.7) * 0.2;
+      leftNormY = 0.5 + Math.cos(drift * 0.5) * 0.2;
+      quatLeft.copy(quatFromPosition(leftNormX, leftNormY));
+    }
+    if(pointerSide !== 'right'){
+      rightNormX = 0.5 + Math.sin(drift * 0.6 + 2) * 0.2;
+      rightNormY = 0.5 + Math.cos(drift * 0.4 + 1) * 0.2;
+      quatRight.copy(quatFromPosition(rightNormX, rightNormY));
+    }
+
+    // Compute commutator magnitude
+    const commMag = quatCommutatorMagnitude(quatLeft, quatRight);
+    const convergence = Math.max(0, 1 - commMag * 2.5);
+
+    // Update audio
+    if(audioCtx){
+      const leftFreqs = quatToEulerFreqs(quatLeft);
+      const rightFreqs = quatToEulerFreqs(quatRight);
+
+      oscLeftA.frequency.setTargetAtTime(leftFreqs.f1, audioCtx.currentTime, 0.08);
+      oscLeftB.frequency.setTargetAtTime(leftFreqs.f2, audioCtx.currentTime, 0.08);
+      oscRightA.frequency.setTargetAtTime(rightFreqs.f1, audioCtx.currentTime, 0.08);
+      oscRightB.frequency.setTargetAtTime(rightFreqs.f2, audioCtx.currentTime, 0.08);
+
+      // Side volumes based on activity
+      const leftVol = 0.1 + (pointerSide === 'left' ? 0.1 : 0);
+      const rightVol = 0.1 + (pointerSide === 'right' ? 0.1 : 0);
+      gainLeftA.gain.setTargetAtTime(leftVol, audioCtx.currentTime, 0.05);
+      gainLeftB.gain.setTargetAtTime(leftVol * 0.7, audioCtx.currentTime, 0.05);
+      gainRightA.gain.setTargetAtTime(rightVol, audioCtx.currentTime, 0.05);
+      gainRightB.gain.setTargetAtTime(rightVol * 0.7, audioCtx.currentTime, 0.05);
+
+      // Center resonant tone: louder when converging
+      const centerFreq = 264 * (1 + convergence * 0.5);
+      oscCenter.frequency.setTargetAtTime(centerFreq, audioCtx.currentTime, 0.1);
+      gainCenter.gain.setTargetAtTime(convergence * 0.25, audioCtx.currentTime, 0.08);
+
+      // Stutter bank: intensifies with divergence (high commutator magnitude)
+      const stutterIntensity = Math.min(1, commMag * 2.5); // 0..1
+      const stutterVol = 0.02 + stutterIntensity * 0.03; // 0.02-0.05 range
+      const stutterRate = 8 + stutterIntensity * 32; // 8-40 Hz LFO
+      stutterLFO.frequency.setTargetAtTime(stutterRate, audioCtx.currentTime, 0.05);
+      stutterLFOGain.gain.setTargetAtTime(stutterIntensity > 0.05 ? stutterVol : 0, audioCtx.currentTime, 0.04);
+      // Slightly drift stutter frequencies based on commutator for movement
+      const stutterBaseFreqs = [3200, 4700, 6100, 7500];
+      for(let i = 0; i < STUTTER_COUNT; i++){
+        const drift = Math.sin(time * (2 + i) + i) * 200 * stutterIntensity;
+        stutterOscs[i].frequency.setTargetAtTime(stutterBaseFreqs[i] + drift, audioCtx.currentTime, 0.06);
+      }
+    }
+
+    // Update particles
+    updateParticles(leftParticles, quatLeft, 'left', dt);
+    updateParticles(rightParticles, quatRight, 'right', dt);
+
+    // Update center line brightness based on convergence
+    centerLineMat.opacity = 0.1 + convergence * 0.8;
+
+    // Update glow lines
+    for(let i = 0; i < centerGlowLines.length; i++){
+      const dist = Math.abs(i - 2);
+      centerGlowLines[i].mat.opacity = convergence * Math.max(0, 0.4 - dist * 0.15);
+    }
+
+    renderer.render(scene, camera);
+  }
+
+  function begin(){
+    if(started) return;
+    started = true;
+    document.getElementById('overlay').classList.add('hidden');
+    initAudio();
+    initScene();
+    animate();
+  }
+
+  // Events
+  document.getElementById('overlay').addEventListener('pointerdown', function(e){
+    e.preventDefault();
+    begin();
+  });
+
+  document.getElementById('info-btn').addEventListener('pointerdown', function(e){
+    e.stopPropagation();
+    document.getElementById('info-panel').classList.toggle('visible');
+  });
+
+  document.getElementById('info-panel').addEventListener('pointerdown', function(e){
+    e.stopPropagation();
+    document.getElementById('info-panel').classList.remove('visible');
+  });
+
+  window.addEventListener('pointermove', function(e){
+    if(!started) return;
+    const nx = e.clientX / window.innerWidth;
+    const ny = 1 - (e.clientY / window.innerHeight);
+
+    if(nx < 0.5){
+      pointerSide = 'left';
+      // Map left half to 0-1 range
+      leftNormX = nx * 2;
+      leftNormY = ny;
+    } else {
+      pointerSide = 'right';
+      // Map right half to 0-1 range
+      rightNormX = (nx - 0.5) * 2;
+      rightNormY = ny;
+    }
+  });
+
+  window.addEventListener('pointerdown', function(e){
+    if(!started) return;
+    const nx = e.clientX / window.innerWidth;
+    const ny = 1 - (e.clientY / window.innerHeight);
+
+    if(nx < 0.5){
+      pointerSide = 'left';
+      leftNormX = nx * 2;
+      leftNormY = ny;
+    } else {
+      pointerSide = 'right';
+      rightNormX = (nx - 0.5) * 2;
+      rightNormY = ny;
+    }
+  });
+
+  window.addEventListener('pointerup', function(){
+    pointerSide = null;
+  });
+
+  // Touch support: track which side finger is on
+  window.addEventListener('touchmove', function(e){
+    if(!started) return;
+    for(let i = 0; i < e.touches.length; i++){
+      const touch = e.touches[i];
+      const nx = touch.clientX / window.innerWidth;
+      const ny = 1 - (touch.clientY / window.innerHeight);
+      if(nx < 0.5){
+        leftNormX = nx * 2;
+        leftNormY = ny;
+        pointerSide = 'left';
+      } else {
+        rightNormX = (nx - 0.5) * 2;
+        rightNormY = ny;
+        pointerSide = 'right';
+      }
+    }
+  }, {passive: true});
+
+  window.addEventListener('resize', function(){
+    if(!renderer) return;
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    updateCamera();
+
+    // Reposition particle bases
+    if(leftParticles && rightParticles){
+      const aspect = window.innerWidth / window.innerHeight;
+      const h = 5;
+      const halfW = h * aspect;
+      leftParticles.forEach(p => { p.baseX = -halfW * 0.5; });
+      rightParticles.forEach(p => { p.baseX = halfW * 0.5; });
+    }
+  });
+})();
+</script>
+</body>
+</html>

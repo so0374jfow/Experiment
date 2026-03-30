@@ -3,68 +3,121 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Quaternion Sound Synthesis — 5 Generative Compositions</title>
+<title>Quaternion Sound Synthesis</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{background:#000;color:#fff;font-family:'Courier New',monospace;min-height:100vh;display:flex;align-items:center;justify-content:center}
-.container{max-width:640px;padding:40px 24px}
-h1{font-size:13px;font-weight:300;letter-spacing:0.4em;text-transform:uppercase;color:#667;margin-bottom:40px}
-.subtitle{font-size:10px;color:#334;letter-spacing:0.3em;margin-bottom:60px;line-height:1.8}
-.piece{margin-bottom:36px;padding-bottom:36px;border-bottom:1px solid #111}
-.piece:last-child{border-bottom:none}
-.piece a{color:#8ac;text-decoration:none;font-size:12px;letter-spacing:0.3em;text-transform:uppercase;display:block;margin-bottom:8px;transition:color 0.3s}
-.piece a:hover{color:#bdf}
-.piece .desc{font-size:9px;color:#445;letter-spacing:0.15em;line-height:1.8}
-.piece .ref{font-size:8px;color:#2a2a35;letter-spacing:0.1em;margin-top:6px;font-style:italic}
-.footer{margin-top:60px;font-size:8px;color:#222;letter-spacing:0.2em;line-height:2}
-.eq{color:#556;font-size:10px;margin-bottom:40px;letter-spacing:0.1em}
+body{background:#000;color:#fff;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;min-height:100vh;padding:60px 24px}
+.container{max-width:720px;margin:0 auto}
+h1{font-size:11px;font-weight:400;letter-spacing:0.5em;text-transform:uppercase;color:#888;margin-bottom:12px}
+.eq{color:#555;font-size:10px;margin-bottom:24px;letter-spacing:0.1em;font-weight:300}
+.subtitle{font-size:10px;color:#444;letter-spacing:0.2em;margin-bottom:48px;line-height:2;font-weight:300}
+.section-label{font-size:9px;font-weight:400;letter-spacing:0.6em;text-transform:uppercase;color:#333;margin-bottom:24px;padding-bottom:12px;border-bottom:1px solid #1a1a1a}
+.pieces{margin-bottom:48px}
+.piece{margin-bottom:28px;padding-bottom:28px;border-bottom:1px solid #111}
+.piece:last-child{border-bottom:none;margin-bottom:0;padding-bottom:0}
+.piece a{color:#fff;text-decoration:none;font-size:11px;letter-spacing:0.35em;text-transform:uppercase;display:block;margin-bottom:6px;transition:color 0.3s;font-weight:400}
+.piece a:hover{color:#999}
+.piece .desc{font-size:9px;color:#555;letter-spacing:0.1em;line-height:1.9;font-weight:300}
+.piece .tag{font-size:8px;color:#333;letter-spacing:0.15em;margin-top:4px;font-weight:300}
+.footer{margin-top:48px;font-size:8px;color:#222;letter-spacing:0.2em;line-height:2.2;font-weight:300}
 </style>
 </head>
 <body>
 <div class="container">
   <h1>Quaternion Sound Synthesis</h1>
-  <div class="eq">q = w + xi + yj + zk &nbsp;&nbsp;&nbsp; i&sup2; = j&sup2; = k&sup2; = ijk = &minus;1</div>
+  <div class="eq">q = w + xi + yj + zk</div>
   <div class="subtitle">
-    Five generative compositions exploring how quaternion<br>
-    imaginary numbers produce sound, space, and movement.<br>
-    Each piece auto-generates an endless orchestration.<br>
-    Click to enter. No interaction required.
+    Fifteen experiments exploring how quaternion<br>
+    imaginary numbers produce sound, space, and movement.
   </div>
 
-  <div class="piece">
-    <a href="v1-quat-field/">01 &mdash; QUAT.FIELD</a>
-    <div class="desc">Ultra-minimal microsound. A grid of points rotating via quaternion SLERP. Sparse sine bursts, sub-bass drones, architectural precision. Sound as spatial geometry.</div>
-    <div class="ref">After Alva Noto</div>
+  <div class="section-label">Generative &mdash; Non-Interactive</div>
+  <div class="pieces">
+    <div class="piece">
+      <a href="v1-quat-field/">01 &mdash; QUAT.FIELD</a>
+      <div class="desc">Minimal microsound. Point grid rotating via SLERP. Sparse sine bursts, sub-bass drones.</div>
+      <div class="tag">After Alva Noto</div>
+    </div>
+    <div class="piece">
+      <a href="v2-eigenspace/">02 &mdash; EIGENSPACE</a>
+      <div class="desc">Psychoacoustic FM synthesis. Non-commutative quaternion products create spectral asymmetry.</div>
+      <div class="tag">After Florian Hecker</div>
+    </div>
+    <div class="piece">
+      <a href="v3-hamiltons-bridge/">03 &mdash; HAMILTON'S BRIDGE</a>
+      <div class="desc">Algebra as music. i, j, k are oscillators in just intonation. Hopf fibration visualization.</div>
+      <div class="tag">After William Rowan Hamilton</div>
+    </div>
+    <div class="piece">
+      <a href="v4-rotorsound/">04 &mdash; ROTORSOUND</a>
+      <div class="desc">Kinetic sculpture. Orbiting rings with irrational period ratios create polyrhythm.</div>
+      <div class="tag">After Zimoun / Ryoji Ikeda</div>
+    </div>
+    <div class="piece">
+      <a href="v5-manifold/">05 &mdash; MANIFOLD</a>
+      <div class="desc">Drone continuum. Quaternion walkers on S3 via stereographic projection. Particle clouds.</div>
+      <div class="tag">After Eliane Radigue</div>
+    </div>
   </div>
 
-  <div class="piece">
-    <a href="v2-eigenspace/">02 &mdash; EIGENSPACE</a>
-    <div class="desc">Psychoacoustic FM synthesis driven by non-commutative quaternion products. q1&middot;q2 &ne; q2&middot;q1 becomes audible spectral asymmetry. Beating frequencies, Shepard tones, perceptual instability.</div>
-    <div class="ref">After Florian Hecker</div>
-  </div>
-
-  <div class="piece">
-    <a href="v3-hamiltons-bridge/">03 &mdash; HAMILTON'S BRIDGE</a>
-    <div class="desc">The quaternion algebra itself is the composition. i, j, k are oscillators in just intonation. When i&middot;j=k, harmonic reinforcement. When i&sup2;=&minus;1, octave descent. Hopf fibration visualization.</div>
-    <div class="ref">After William Rowan Hamilton</div>
-  </div>
-
-  <div class="piece">
-    <a href="v4-rotorsound/">04 &mdash; ROTORSOUND</a>
-    <div class="desc">Kinetic sound sculpture. Orbiting rings with irrational period ratios (&pi;, e, &radic;2, &phi;) create non-repeating polyrhythm. Proximity triggers percussive tones. Quaternion rotation as rhythm machine.</div>
-    <div class="ref">After Zimoun / Ryoji Ikeda</div>
-  </div>
-
-  <div class="piece">
-    <a href="v5-manifold/">05 &mdash; MANIFOLD</a>
-    <div class="desc">Immersive drone continuum. Quaternion walkers on S&sup3; trace paths via stereographic projection. Particle clouds coalesce and dissolve. Layered harmonics over 30&ndash;120 second arcs. Rotation space is continuous.</div>
-    <div class="ref">After &Eacute;liane Radigue</div>
+  <div class="section-label">Interactive &mdash; Touch / Mouse</div>
+  <div class="pieces">
+    <div class="piece">
+      <a href="v6-touch-field/">06 &mdash; TOUCH.FIELD</a>
+      <div class="desc">Touch position drives quaternion rotation of a point cloud. Distance from center sets pitch. High-frequency stutter oscillators respond to gesture velocity.</div>
+      <div class="tag">Interactive &mdash; Drag to play</div>
+    </div>
+    <div class="piece">
+      <a href="v7-spin-lattice/">07 &mdash; SPIN.LATTICE</a>
+      <div class="desc">Drag to spin a wireframe lattice. Angular velocity maps to pitch and stutter density. Each rotation axis activates a different oscillator bank.</div>
+      <div class="tag">Interactive &mdash; Drag to spin</div>
+    </div>
+    <div class="piece">
+      <a href="v8-chord-space/">08 &mdash; CHORD.SPACE</a>
+      <div class="desc">Place nodes on a sphere. Angular distance between quaternions determines musical intervals. Close nodes produce consonance, distant nodes dissonance.</div>
+      <div class="tag">Interactive &mdash; Click to place nodes</div>
+    </div>
+    <div class="piece">
+      <a href="v9-wave-collapse/">09 &mdash; WAVE.COLLAPSE</a>
+      <div class="desc">Click to spawn circular waves. Overlapping waves multiply quaternions creating FM interference. Rapid clicks produce dense stutter textures.</div>
+      <div class="tag">Interactive &mdash; Click to spawn waves</div>
+    </div>
+    <div class="piece">
+      <a href="v10-axis-lock/">10 &mdash; AXIS.LOCK</a>
+      <div class="desc">Toggle i, j, k axes on and off. Each axis drives its own oscillator. Mouse height controls rotation speed and stutter rate.</div>
+      <div class="tag">Interactive &mdash; Toggle axes</div>
+    </div>
+    <div class="piece">
+      <a href="v11-phase-mirror/">11 &mdash; PHASE.MIRROR</a>
+      <div class="desc">Split screen. Each side has its own quaternion field. Convergence produces harmony, divergence produces dissonance. Center line is the commutator.</div>
+      <div class="tag">Interactive &mdash; Move on each side</div>
+    </div>
+    <div class="piece">
+      <a href="v12-grain-cloud/">12 &mdash; GRAIN.CLOUD</a>
+      <div class="desc">Granular synthesis in quaternion space. Mouse spawns 20-80ms sine grains. Speed controls density. High-pitch micro-grains stutter at gesture peaks.</div>
+      <div class="tag">Interactive &mdash; Move to scatter grains</div>
+    </div>
+    <div class="piece">
+      <a href="v13-string-tensor/">13 &mdash; STRING.TENSOR</a>
+      <div class="desc">Eight strings tuned to quaternion-derived harmonics. Pluck by dragging. Neighboring strings resonate via quaternion coupling.</div>
+      <div class="tag">Interactive &mdash; Drag to pluck</div>
+    </div>
+    <div class="piece">
+      <a href="v14-pulse-grid/">14 &mdash; PULSE.GRID</a>
+      <div class="desc">8x8 step sequencer. Cell position maps to quaternion pitch and rhythm. Toggle cells to compose. Stutter patterns from high-speed column triggers.</div>
+      <div class="tag">Interactive &mdash; Click cells</div>
+    </div>
+    <div class="piece">
+      <a href="v15-orbit-draw/">15 &mdash; ORBIT.DRAW</a>
+      <div class="desc">Draw paths that become quaternion orbits via SQUAD interpolation. Dots travel your curves generating sound. Multiple orbits for polyphony.</div>
+      <div class="tag">Interactive &mdash; Draw orbits</div>
+    </div>
   </div>
 
   <div class="footer">
-    Quaternion sound synthesis after DAFx 2020<br>
+    Quaternion sound synthesis<br>
     Three.js + Web Audio API<br>
-    Each composition is endless and generative
+    Multiple oscillator banks with high-frequency stutter synthesis
   </div>
 </div>
 </body>

@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>SPIN.LATTICE — Quaternion Sound Synthesis v7</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#000;overflow:hidden;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;color:#fff;touch-action:none}
+canvas{display:block}
+#overlay{position:fixed;top:0;left:0;width:100%;height:100%;display:flex;align-items:center;justify-content:center;z-index:100;background:#000;cursor:pointer}
+#overlay.hidden{opacity:0;pointer-events:none;transition:opacity 1s}
+#overlay-text{text-align:center;letter-spacing:0.3em;text-transform:uppercase}
+#overlay-text h1{font-size:16px;font-weight:300;margin-bottom:10px;color:#fff}
+#overlay-text p{font-size:10px;font-weight:300;color:#888;letter-spacing:0.5em}
+#info-btn{position:fixed;top:16px;left:16px;width:32px;height:32px;border-radius:50%;border:1px solid #555;background:transparent;color:#fff;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:14px;font-style:italic;cursor:pointer;z-index:90;display:flex;align-items:center;justify-content:center;transition:border-color 0.3s}
+#info-btn:hover{border-color:#fff}
+#info-panel{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.92);z-index:80;display:none;align-items:center;justify-content:center;padding:40px}
+#info-panel.visible{display:flex}
+#info-content{max-width:560px;font-size:13px;line-height:1.8;color:#ccc;letter-spacing:0.02em}
+#info-content h2{font-size:14px;font-weight:400;letter-spacing:0.3em;text-transform:uppercase;color:#fff;margin-bottom:16px}
+#hud{position:fixed;bottom:16px;left:16px;font-size:9px;color:#333;letter-spacing:0.15em;z-index:5;text-transform:uppercase}
+</style>
+</head>
+<body>
+<div id="overlay">
+  <div id="overlay-text">
+    <h1>spin.lattice</h1>
+    <p>click to begin</p>
+  </div>
+</div>
+<button id="info-btn">i</button>
+<div id="info-panel">
+  <div id="info-content">
+    <h2>Spin.Lattice</h2>
+    You spin a 3D lattice by clicking and dragging. Your drag gesture is converted to a quaternion rotation using the axis-angle method — the drag direction becomes the rotation axis, drag speed becomes the angle. The quaternion's three imaginary components (x, y, z) each drive a separate oscillator: x controls a sine wave, y a triangle wave, z a filtered sawtooth. Angular velocity maps to pitch (0–1200 Hz) and amplitude. The lattice has physical inertia — it decelerates via quaternion SLERP toward identity, and the sound fades with it.
+  </div>
+</div>
+<div id="hud"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function(){
+  'use strict';
+
+  let audioCtx, masterGain;
+  let oscX, oscY, oscZ, filterZ, gainX, gainY, gainZ;
+  let stutterOscs = [], stutterGains = [], stutterLFO, stutterLFOGain;
+  let scene, camera, renderer;
+  let latticeGroup, latticeLines;
+  let started = false;
+
+  const WIDTH = () => window.innerWidth;
+  const HEIGHT = () => window.innerHeight;
+
+  // Rotation state
+  const currentQuat = new THREE.Quaternion();
+  const angularVelocity = new THREE.Vector3(0, 0, 0);
+  const DECEL = 0.97; // Inertia deceleration
+  const DRAG_SENSITIVITY = 0.006;
+
+  // Pointer state
+  let dragging = false;
+  let prevPointer = { x: 0, y: 0 };
+
+  // --- THREE.JS SETUP ---
+  function initScene() {
+    scene = new THREE.Scene();
+    camera = new THREE.PerspectiveCamera(55, WIDTH() / HEIGHT(), 0.1, 100);
+    camera.position.z = 8;
+
+    renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(WIDTH(), HEIGHT());
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setClearColor(0x000000);
+    document.body.appendChild(renderer.domElement);
+
+    // Build wireframe lattice
+    latticeGroup = new THREE.Group();
+    scene.add(latticeGroup);
+
+    const gridN = 4;
+    const spacing = 1.2;
+    const offset = (gridN - 1) * spacing * 0.5;
+    const positions = [];
+
+    // Lines along each axis
+    for (let a = 0; a < gridN; a++) {
+      for (let b = 0; b < gridN; b++) {
+        const a0 = a * spacing - offset;
+        const b0 = b * spacing - offset;
+        // X-axis lines
+        positions.push(-offset, a0, b0, offset + (gridN - 1) * spacing - offset, a0, b0);
+        // Y-axis lines
+        positions.push(a0, -offset, b0, a0, offset + (gridN - 1) * spacing - offset, b0);
+        // Z-axis lines
+        positions.push(a0, b0, -offset, a0, b0, offset + (gridN - 1) * spacing - offset);
+      }
+    }
+
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+
+    const mat = new THREE.LineBasicMaterial({ color: 0x888888 });
+    latticeLines = new THREE.LineSegments(geom, mat);
+    latticeGroup.add(latticeLines);
+  }
+
+  // --- AUDIO ---
+  function initAudio() {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    masterGain = audioCtx.createGain();
+    masterGain.gain.value = 0.4;
+    masterGain.connect(audioCtx.destination);
+
+    // X: sine
+    oscX = audioCtx.createOscillator();
+    oscX.type = 'sine';
+    oscX.frequency.value = 0;
+    gainX = audioCtx.createGain();
+    gainX.gain.value = 0;
+    oscX.connect(gainX);
+    gainX.connect(masterGain);
+    oscX.start();
+
+    // Y: triangle
+    oscY = audioCtx.createOscillator();
+    oscY.type = 'triangle';
+    oscY.frequency.value = 0;
+    gainY = audioCtx.createGain();
+    gainY.gain.value = 0;
+    oscY.connect(gainY);
+    gainY.connect(masterGain);
+    oscY.start();
+
+    // Z: sawtooth through heavy filter
+    oscZ = audioCtx.createOscillator();
+    oscZ.type = 'sawtooth';
+    oscZ.frequency.value = 0;
+    filterZ = audioCtx.createBiquadFilter();
+    filterZ.type = 'lowpass';
+    filterZ.frequency.value = 800;
+    filterZ.Q.value = 5;
+    gainZ = audioCtx.createGain();
+    gainZ.gain.value = 0;
+    oscZ.connect(filterZ);
+    filterZ.connect(gainZ);
+    gainZ.connect(masterGain);
+    oscZ.start();
+
+    // Stutter oscillator bank: 4 high-pitch sine oscillators gated by a square-wave LFO
+    const stutterFreqs = [3200, 4700, 5900, 7400];
+    stutterLFO = audioCtx.createOscillator();
+    stutterLFO.type = 'square';
+    stutterLFO.frequency.value = 8;
+    stutterLFOGain = audioCtx.createGain();
+    stutterLFOGain.gain.value = 0;
+    stutterLFO.connect(stutterLFOGain);
+    stutterLFO.start();
+
+    stutterFreqs.forEach(freq => {
+      const osc = audioCtx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      const gain = audioCtx.createGain();
+      gain.gain.value = 0;
+      osc.connect(gain);
+      stutterLFOGain.connect(gain.gain);
+      gain.connect(masterGain);
+      osc.start();
+      stutterOscs.push(osc);
+      stutterGains.push(gain);
+    });
+  }
+
+  function updateAudio() {
+    if (!audioCtx) return;
+    const t = audioCtx.currentTime;
+    const speed = angularVelocity.length();
+    const ramp = 0.05;
+
+    // Quaternion imaginary components
+    const qx = Math.abs(currentQuat.x);
+    const qy = Math.abs(currentQuat.y);
+    const qz = Math.abs(currentQuat.z);
+
+    // Pitch mapped from angular velocity 0-1200Hz
+    const pitchScale = Math.min(speed * 200, 1200);
+    oscX.frequency.setTargetAtTime(pitchScale * (0.5 + qx), t, ramp);
+    oscY.frequency.setTargetAtTime(pitchScale * (0.5 + qy), t, ramp);
+    oscZ.frequency.setTargetAtTime(pitchScale * (0.5 + qz), t, ramp);
+
+    // Amplitude from speed
+    const amp = Math.min(speed * 0.5, 0.25);
+    gainX.gain.setTargetAtTime(amp * qx * 2, t, ramp);
+    gainY.gain.setTargetAtTime(amp * qy * 2, t, ramp);
+    gainZ.gain.setTargetAtTime(amp * qz * 2, t, ramp);
+
+    // Filter opens with speed
+    filterZ.frequency.setTargetAtTime(200 + speed * 800, t, ramp);
+
+    // Stutter: angular velocity drives rate (8-40 Hz) and intensity (0-0.05 gain)
+    if (stutterLFO) {
+      const stutterRate = 8 + Math.min(speed * 8, 1) * 32;
+      const stutterIntensity = Math.min(speed * 0.02, 0.05);
+      stutterLFO.frequency.setTargetAtTime(stutterRate, t, ramp);
+      stutterLFOGain.gain.setTargetAtTime(stutterIntensity, t, ramp);
+    }
+  }
+
+  // --- POINTER ---
+  function onPointerDown(e) {
+    if (!started) return;
+    dragging = true;
+    prevPointer.x = e.clientX;
+    prevPointer.y = e.clientY;
+  }
+
+  function onPointerMove(e) {
+    if (!started || !dragging) return;
+    const dx = e.clientX - prevPointer.x;
+    const dy = e.clientY - prevPointer.y;
+    prevPointer.x = e.clientX;
+    prevPointer.y = e.clientY;
+
+    // Drag direction becomes rotation axis (perpendicular to drag direction on screen)
+    // dx -> rotate around Y, dy -> rotate around X
+    angularVelocity.x += dy * DRAG_SENSITIVITY;
+    angularVelocity.y += dx * DRAG_SENSITIVITY;
+    // Add some Z from diagonal drags
+    angularVelocity.z += (dx - dy) * DRAG_SENSITIVITY * 0.3;
+  }
+
+  function onPointerUp() {
+    dragging = false;
+  }
+
+  // --- UI ---
+  function initUI() {
+    const btn = document.getElementById('info-btn');
+    const panel = document.getElementById('info-panel');
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      panel.classList.toggle('visible');
+    });
+    panel.addEventListener('click', () => {
+      panel.classList.remove('visible');
+    });
+  }
+
+  function start() {
+    if (started) return;
+    started = true;
+    initAudio();
+    document.getElementById('overlay').classList.add('hidden');
+  }
+
+  // --- ANIMATE ---
+  function animate() {
+    requestAnimationFrame(animate);
+
+    // Apply angular velocity as quaternion rotation
+    const speed = angularVelocity.length();
+    if (speed > 0.0001) {
+      const axis = angularVelocity.clone().normalize();
+      const deltaQ = new THREE.Quaternion();
+      deltaQ.setFromAxisAngle(axis, speed * 0.1);
+      currentQuat.premultiply(deltaQ);
+      currentQuat.normalize();
+    }
+
+    // Decelerate (inertia)
+    if (!dragging) {
+      angularVelocity.multiplyScalar(DECEL);
+    }
+
+    // Apply rotation to lattice
+    latticeGroup.quaternion.copy(currentQuat);
+
+    // Line brightness from speed
+    const brightness = Math.min(speed * 0.3, 1);
+    const gray = Math.floor(0x44 + brightness * (0xff - 0x44));
+    latticeLines.material.color.setRGB(gray / 255, gray / 255, gray / 255);
+
+    // Audio update
+    updateAudio();
+
+    // HUD
+    const hud = document.getElementById('hud');
+    hud.textContent = 'q: ' + currentQuat.w.toFixed(2) + ' + ' +
+      currentQuat.x.toFixed(2) + 'i + ' +
+      currentQuat.y.toFixed(2) + 'j + ' +
+      currentQuat.z.toFixed(2) + 'k  |  speed: ' + speed.toFixed(3);
+
+    renderer.render(scene, camera);
+  }
+
+  // --- INIT ---
+  function init() {
+    initScene();
+    initUI();
+
+    document.getElementById('overlay').addEventListener('pointerdown', (e) => {
+      start();
+    });
+
+    const canvas = renderer.domElement;
+    canvas.addEventListener('pointerdown', onPointerDown);
+    canvas.addEventListener('pointermove', onPointerMove);
+    canvas.addEventListener('pointerup', onPointerUp);
+    canvas.addEventListener('pointercancel', onPointerUp);
+    canvas.addEventListener('pointerleave', onPointerUp);
+
+    window.addEventListener('resize', () => {
+      camera.aspect = WIDTH() / HEIGHT();
+      camera.updateProjectionMatrix();
+      renderer.setSize(WIDTH(), HEIGHT());
+    });
+
+    animate();
+  }
+
+  init();
+})();
+</script>
+</body>
+</html>

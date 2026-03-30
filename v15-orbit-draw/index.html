@@ -1,0 +1,767 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>ORBIT.DRAW — Quaternion Sound Synthesis v15</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#000;overflow:hidden;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;color:#fff;touch-action:none;-webkit-user-select:none;user-select:none}
+canvas{display:block}
+
+#overlay{position:fixed;top:0;left:0;width:100%;height:100%;display:flex;align-items:center;justify-content:center;z-index:100;background:#000;cursor:pointer;transition:opacity 0.8s}
+#overlay.hidden{opacity:0;pointer-events:none}
+#overlay-text{text-align:center;letter-spacing:0.3em;text-transform:uppercase}
+#overlay-text h1{font-size:16px;font-weight:300;margin-bottom:10px;color:#fff}
+#overlay-text p{font-size:10px;font-weight:300;color:#888;letter-spacing:0.5em}
+
+#info-btn{position:fixed;top:16px;left:16px;width:32px;height:32px;border-radius:50%;border:1px solid #555;background:transparent;color:#888;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:14px;font-style:italic;cursor:pointer;z-index:50;display:flex;align-items:center;justify-content:center;transition:border-color 0.3s,color 0.3s;line-height:1}
+#info-btn:hover{border-color:#fff;color:#fff}
+
+#info-panel{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.92);z-index:40;display:none;align-items:center;justify-content:center;padding:40px}
+#info-panel.visible{display:flex}
+#info-content{max-width:560px;font-size:13px;line-height:1.8;color:#ccc;letter-spacing:0.02em;font-weight:300}
+#info-content h2{font-size:11px;font-weight:400;letter-spacing:0.3em;text-transform:uppercase;color:#fff;margin-bottom:20px}
+#info-content p{margin-bottom:16px}
+#info-content .hint{font-size:10px;color:#555;letter-spacing:0.15em;text-transform:uppercase;margin-top:24px}
+
+#hud{position:fixed;bottom:14px;left:16px;font-size:9px;color:#333;letter-spacing:0.15em;text-transform:uppercase;z-index:5}
+#orbit-count{position:fixed;bottom:14px;right:16px;font-size:9px;color:#333;letter-spacing:0.15em;text-transform:uppercase;z-index:5}
+</style>
+</head>
+<body>
+
+<div id="overlay">
+  <div id="overlay-text">
+    <h1>orbit.draw</h1>
+    <p>click to begin</p>
+  </div>
+</div>
+
+<button id="info-btn" aria-label="Info">i</button>
+
+<div id="info-panel">
+  <div id="info-content">
+    <h2>Orbit.Draw — Quaternion Path Synthesis</h2>
+    <p>Your drawn path is sampled at regular intervals and each point is mapped to a quaternion on the unit 3-sphere via stereographic projection. The path is then smoothed using SQUAD (Spherical Quadrangle) interpolation — the quaternion equivalent of cubic splines.</p>
+    <p>A point travels along this smooth quaternion curve, and at each moment its quaternion state determines the sound: w sets the fundamental frequency (110–440 Hz), the vector part (x, y, z) sets three harmonics whose amplitudes create the timbre.</p>
+    <p>Drawing fast creates wider orbits with more frequency variation; drawing slowly creates tight loops with subtle modulation. Multiple orbits create independent voices.</p>
+    <p class="hint">Draw paths with click-drag &middot; Double-click to clear all</p>
+  </div>
+</div>
+
+<div id="hud">orbit.draw</div>
+<div id="orbit-count"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function() {
+  'use strict';
+
+  // ─── STATE ───
+  var audioCtx = null;
+  var masterGain = null;
+  var scene, camera, renderer;
+  var started = false;
+  var time = 0;
+  var drawing = false;
+  var currentDrawPoints = [];
+  var orbits = [];
+  var MAX_ORBITS = 8;
+  var SAMPLE_INTERVAL = 12;
+  var lastSamplePos = null;
+  var lastClickTime = 0;
+  var orbitIdCounter = 0;
+
+  // ─── STUTTER OSCILLATOR BANK ───
+  var stutterOscs = [];
+  var stutterGains = [];
+  var stutterLFO = null;
+  var stutterLFOGain = null;
+  var stutterMaster = null;
+  var stutterFreqs = [3100, 4400, 5700, 7000, 7800];
+  var lastDrawPos = null;
+  var lastDrawTime = 0;
+
+  // Timbre presets per orbit index (wave types for harmonics)
+  var TIMBRES = [
+    ['sine', 'sine', 'triangle', 'sine'],
+    ['sine', 'triangle', 'sine', 'triangle'],
+    ['triangle', 'sine', 'sine', 'sine'],
+    ['sine', 'sine', 'sine', 'sawtooth'],
+    ['triangle', 'triangle', 'sine', 'sine'],
+    ['sine', 'sawtooth', 'sine', 'triangle'],
+    ['triangle', 'sine', 'triangle', 'sine'],
+    ['sine', 'triangle', 'triangle', 'triangle']
+  ];
+
+  // ─── THREE.JS SETUP ───
+  scene = new THREE.Scene();
+  camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+  camera.position.set(0, 0, 5);
+
+  renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setClearColor(0x000000);
+  document.body.appendChild(renderer.domElement);
+
+  // ─── QUATERNION MATH ───
+
+  function screenToQuat(x, y, w, h) {
+    // Stereographic projection: map normalized screen coords to quaternion on S3
+    var nx = (x / w - 0.5) * 4;
+    var ny = (y / h - 0.5) * 4;
+    var r2 = nx * nx + ny * ny;
+    var denom = 1 + r2;
+    var sx = (2 * nx) / denom;
+    var sy = (2 * ny) / denom;
+    var sz = (r2 - 1) / denom;
+    var r = Math.sqrt(r2);
+    var angle = Math.PI * r / (1 + r);
+    var len = Math.sqrt(sx * sx + sy * sy + sz * sz);
+    if (len < 1e-6) return new THREE.Quaternion(0, 0, 0, 1);
+    var s = Math.sin(angle / 2) / len;
+    return new THREE.Quaternion(sx * s, sy * s, sz * s, Math.cos(angle / 2)).normalize();
+  }
+
+  function quatDot(a, b) {
+    return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
+  }
+
+  function quatSlerp(a, b, t) {
+    var result = new THREE.Quaternion();
+    var bAdj = b.clone();
+    if (quatDot(a, bAdj) < 0) {
+      bAdj.set(-bAdj.x, -bAdj.y, -bAdj.z, -bAdj.w);
+    }
+    result.copy(a).slerp(bAdj, t);
+    return result;
+  }
+
+  function quatExp(q) {
+    var vLen = Math.sqrt(q.x * q.x + q.y * q.y + q.z * q.z);
+    if (vLen < 1e-8) return new THREE.Quaternion(0, 0, 0, 1);
+    var s = Math.sin(vLen) / vLen;
+    return new THREE.Quaternion(q.x * s, q.y * s, q.z * s, Math.cos(vLen));
+  }
+
+  function quatLog(q) {
+    var vLen = Math.sqrt(q.x * q.x + q.y * q.y + q.z * q.z);
+    if (vLen < 1e-8) return new THREE.Quaternion(0, 0, 0, 0);
+    var angle = Math.atan2(vLen, q.w);
+    var s = angle / vLen;
+    return new THREE.Quaternion(q.x * s, q.y * s, q.z * s, 0);
+  }
+
+  function quatMultiply(a, b) {
+    return a.clone().multiply(b);
+  }
+
+  function quatInverse(q) {
+    return q.clone().conjugate();
+  }
+
+  // SQUAD control point
+  function computeSquadControlPoint(qPrev, qCurr, qNext) {
+    var invCurr = quatInverse(qCurr);
+    var log1 = quatLog(quatMultiply(invCurr, qNext));
+    var log2 = quatLog(quatMultiply(invCurr, qPrev));
+    var sum = new THREE.Quaternion(
+      -(log1.x + log2.x) / 4,
+      -(log1.y + log2.y) / 4,
+      -(log1.z + log2.z) / 4,
+      0
+    );
+    return quatMultiply(qCurr, quatExp(sum)).normalize();
+  }
+
+  // SQUAD interpolation
+  function squadInterpolate(q0, q1, s0, s1, t) {
+    var slerpQ = quatSlerp(q0, q1, t);
+    var slerpS = quatSlerp(s0, s1, t);
+    return quatSlerp(slerpQ, slerpS, 2 * t * (1 - t));
+  }
+
+  // Map quaternion to 3D point for visualization (stereographic S3 -> R3)
+  function quatTo3D(q) {
+    var d = 1.0 - q.w;
+    if (Math.abs(d) < 0.02) d = d < 0 ? -0.02 : 0.02;
+    var scale = 1.0;
+    return new THREE.Vector3(
+      (q.x / d) * scale,
+      (q.y / d) * scale,
+      (q.z / d) * scale
+    );
+  }
+
+  // Clamp 3D point to avoid extreme positions
+  function clampVec3(v, maxLen) {
+    var len = v.length();
+    if (len > maxLen) v.multiplyScalar(maxLen / len);
+    return v;
+  }
+
+  // ─── ORBIT CLASS ───
+
+  function Orbit(screenPoints, index) {
+    this.id = orbitIdCounter++;
+    this.index = index % TIMBRES.length;
+    this.alive = true;
+    this.phase = 0;
+    this.fadeIn = 0;
+
+    // Sample quaternions from screen points
+    this.quats = [];
+    for (var i = 0; i < screenPoints.length; i++) {
+      this.quats.push(screenToQuat(
+        screenPoints[i].x, screenPoints[i].y,
+        window.innerWidth, window.innerHeight
+      ));
+    }
+    if (this.quats.length < 2) {
+      this.alive = false;
+      return;
+    }
+
+    // Close the loop
+    var closeCount = Math.min(3, this.quats.length);
+    for (var j = 0; j < closeCount; j++) {
+      this.quats.push(this.quats[j].clone());
+    }
+
+    // Compute SQUAD control points
+    this.controlPoints = [];
+    var n = this.quats.length;
+    for (var k = 0; k < n; k++) {
+      var prev = this.quats[(k - 1 + n) % n];
+      var curr = this.quats[k];
+      var next = this.quats[(k + 1) % n];
+      this.controlPoints.push(computeSquadControlPoint(prev, curr, next));
+    }
+
+    // Compute traversal speed from path length
+    var totalDist = 0;
+    for (var m = 0; m < screenPoints.length - 1; m++) {
+      var dx = screenPoints[m + 1].x - screenPoints[m].x;
+      var dy = screenPoints[m + 1].y - screenPoints[m].y;
+      totalDist += Math.sqrt(dx * dx + dy * dy);
+    }
+    this.speed = 0.12 + (totalDist / window.innerWidth) * 0.35;
+    this.segCount = this.quats.length - 1;
+
+    this.buildVisual();
+    this.setupAudio();
+  }
+
+  Orbit.prototype.evaluate = function(t) {
+    var segF = t * this.segCount;
+    var seg = Math.floor(segF);
+    if (seg >= this.segCount) seg = this.segCount - 1;
+    if (seg < 0) seg = 0;
+    var localT = segF - seg;
+
+    var q0 = this.quats[seg];
+    var q1 = this.quats[seg + 1];
+    var s0 = this.controlPoints[seg];
+    var s1 = this.controlPoints[seg + 1];
+
+    return squadInterpolate(q0, q1, s0, s1, localT);
+  };
+
+  Orbit.prototype.buildVisual = function() {
+    var resolution = Math.max(120, this.quats.length * 12);
+    var points3D = [];
+    for (var i = 0; i <= resolution; i++) {
+      var t = i / resolution;
+      var q = this.evaluate(t);
+      var pos = clampVec3(quatTo3D(q), 6);
+      points3D.push(pos);
+    }
+
+    // Orbit path line
+    var lineGeo = new THREE.BufferGeometry().setFromPoints(points3D);
+    var lineMat = new THREE.LineBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0.3
+    });
+    this.line = new THREE.Line(lineGeo, lineMat);
+    scene.add(this.line);
+
+    // Traveling dot
+    var dotGeo = new THREE.SphereGeometry(0.045, 10, 10);
+    var dotMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+    this.dot = new THREE.Mesh(dotGeo, dotMat);
+    scene.add(this.dot);
+
+    // Trail buffer
+    this.trailMaxLength = 100;
+    this.trailPositions = [];
+    var trailVerts = new Float32Array(this.trailMaxLength * 3);
+    var trailColors = new Float32Array(this.trailMaxLength * 3);
+    var trailGeo = new THREE.BufferGeometry();
+    trailGeo.setAttribute('position', new THREE.BufferAttribute(trailVerts, 3));
+    trailGeo.setAttribute('color', new THREE.BufferAttribute(trailColors, 3));
+    trailGeo.setDrawRange(0, 0);
+    var trailMat = new THREE.LineBasicMaterial({
+      vertexColors: true,
+      transparent: true,
+      opacity: 0.6
+    });
+    this.trail = new THREE.Line(trailGeo, trailMat);
+    scene.add(this.trail);
+  };
+
+  Orbit.prototype.setupAudio = function() {
+    if (!audioCtx) return;
+
+    this.gainNode = audioCtx.createGain();
+    this.gainNode.gain.value = 0;
+    this.gainNode.connect(masterGain);
+
+    var timbre = TIMBRES[this.index];
+    this.oscillators = [];
+    this.oscGains = [];
+
+    for (var i = 0; i < 4; i++) {
+      var osc = audioCtx.createOscillator();
+      osc.type = timbre[i];
+      osc.frequency.value = 220;
+      var g = audioCtx.createGain();
+      g.gain.value = 0;
+      osc.connect(g);
+      g.connect(this.gainNode);
+      osc.start();
+      this.oscillators.push(osc);
+      this.oscGains.push(g);
+    }
+  };
+
+  Orbit.prototype.update = function(dt) {
+    if (!this.alive) return;
+
+    // Fade in
+    this.fadeIn = Math.min(this.fadeIn + dt * 2, 1);
+
+    this.phase += dt * this.speed;
+    if (this.phase >= 1) this.phase -= 1;
+
+    var q = this.evaluate(this.phase);
+    var pos = clampVec3(quatTo3D(q), 6);
+    this.dot.position.copy(pos);
+
+    // Update trail
+    this.trailPositions.push(pos.clone());
+    if (this.trailPositions.length > this.trailMaxLength) {
+      this.trailPositions.shift();
+    }
+
+    var trailPosAttr = this.trail.geometry.getAttribute('position');
+    var trailColAttr = this.trail.geometry.getAttribute('color');
+    var count = this.trailPositions.length;
+    for (var i = 0; i < count; i++) {
+      trailPosAttr.setXYZ(i,
+        this.trailPositions[i].x,
+        this.trailPositions[i].y,
+        this.trailPositions[i].z
+      );
+      // Fade: older points dimmer
+      var brightness = (i / count) * 0.7;
+      trailColAttr.setXYZ(i, brightness, brightness, brightness);
+    }
+    trailPosAttr.needsUpdate = true;
+    trailColAttr.needsUpdate = true;
+    this.trail.geometry.setDrawRange(0, count);
+
+    // Orbit line slow fade
+    if (this.line) {
+      this.line.material.opacity = 0.15 + Math.sin(time * 0.5 + this.id) * 0.08;
+    }
+
+    // Audio update
+    if (audioCtx && this.oscillators && this.fadeIn > 0) {
+      var now = audioCtx.currentTime;
+      var targetLevel = (0.18 / Math.max(1, orbits.length)) * this.fadeIn;
+      this.gainNode.gain.setTargetAtTime(targetLevel, now, 0.05);
+
+      // w -> fundamental frequency (110 - 440 Hz)
+      var freq = 110 + (q.w + 1) * 0.5 * 330;
+      freq = Math.max(60, Math.min(600, freq));
+      this.oscillators[0].frequency.setTargetAtTime(freq, now, 0.02);
+      this.oscillators[1].frequency.setTargetAtTime(freq * 2, now, 0.02);
+      this.oscillators[2].frequency.setTargetAtTime(freq * 3, now, 0.02);
+      this.oscillators[3].frequency.setTargetAtTime(freq * 4, now, 0.02);
+
+      // Vector part (x,y,z) sets harmonic amplitudes
+      var ax = Math.abs(q.x);
+      var ay = Math.abs(q.y);
+      var az = Math.abs(q.z);
+      this.oscGains[0].gain.setTargetAtTime(0.35, now, 0.03);
+      this.oscGains[1].gain.setTargetAtTime(ax * 0.4, now, 0.03);
+      this.oscGains[2].gain.setTargetAtTime(ay * 0.35, now, 0.03);
+      this.oscGains[3].gain.setTargetAtTime(az * 0.3, now, 0.03);
+
+      // Curvature-based stutter: compare current quaternion direction to previous
+      if (this._prevQuat) {
+        var dot = Math.abs(quatDot(q, this._prevQuat));
+        var curvature = 1.0 - Math.min(1.0, dot); // 0 = straight, ~1 = sharp turn
+        if (curvature > 0.008) {
+          var cIntensity = Math.min(1, curvature * 30);
+          activateStutter(cIntensity, 0.04 + cIntensity * 0.06);
+        }
+      }
+      this._prevQuat = q.clone();
+    }
+  };
+
+  Orbit.prototype.destroy = function() {
+    this.alive = false;
+    var self = this;
+
+    if (this.gainNode && audioCtx) {
+      this.gainNode.gain.setTargetAtTime(0, audioCtx.currentTime, 0.08);
+    }
+
+    setTimeout(function() {
+      if (self.oscillators) {
+        for (var i = 0; i < self.oscillators.length; i++) {
+          try { self.oscillators[i].stop(); } catch(e) {}
+        }
+        self.oscillators = null;
+      }
+      if (self.line) {
+        scene.remove(self.line);
+        self.line.geometry.dispose();
+        self.line.material.dispose();
+        self.line = null;
+      }
+      if (self.dot) {
+        scene.remove(self.dot);
+        self.dot.geometry.dispose();
+        self.dot.material.dispose();
+        self.dot = null;
+      }
+      if (self.trail) {
+        scene.remove(self.trail);
+        self.trail.geometry.dispose();
+        self.trail.material.dispose();
+        self.trail = null;
+      }
+    }, 250);
+  };
+
+  // ─── STUTTER CONTROL ───
+
+  function activateStutter(intensity, duration) {
+    // intensity: 0..1, duration in seconds
+    if (!audioCtx || !stutterMaster) return;
+    var now = audioCtx.currentTime;
+    intensity = Math.max(0, Math.min(1, intensity));
+    var lfoRate = 8 + intensity * 32; // 8-40 Hz
+    var perOscGain = 0.02 + intensity * 0.03; // 0.02-0.05
+    var oscCount = Math.max(1, Math.min(stutterFreqs.length, Math.ceil(intensity * stutterFreqs.length)));
+
+    stutterLFO.frequency.setTargetAtTime(lfoRate, now, 0.005);
+
+    for (var i = 0; i < stutterFreqs.length; i++) {
+      if (i < oscCount) {
+        stutterGains[i].gain.setTargetAtTime(perOscGain, now, 0.003);
+        stutterGains[i].gain.setTargetAtTime(0, now + duration, 0.015);
+      } else {
+        stutterGains[i].gain.setTargetAtTime(0, now, 0.003);
+      }
+    }
+
+    stutterLFOGain.gain.setValueAtTime(1, now);
+    stutterLFOGain.gain.setValueAtTime(1, now + duration);
+    stutterLFOGain.gain.linearRampToValueAtTime(0, now + duration + 0.02);
+  }
+
+  // ─── DRAWING HELPERS ───
+
+  function getPointerPos(e) {
+    if (e.touches && e.touches.length > 0) {
+      return { x: e.touches[0].clientX, y: e.touches[0].clientY };
+    }
+    return { x: e.clientX, y: e.clientY };
+  }
+
+  // ─── 2D OVERLAY CANVAS (drawing preview) ───
+  var drawCanvas = null;
+  var drawCtx = null;
+  var dpr = 1;
+
+  function setupDrawCanvas() {
+    drawCanvas = document.createElement('canvas');
+    dpr = Math.min(window.devicePixelRatio, 2);
+    drawCanvas.width = window.innerWidth * dpr;
+    drawCanvas.height = window.innerHeight * dpr;
+    drawCanvas.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;z-index:2;pointer-events:none;';
+    document.body.appendChild(drawCanvas);
+    drawCtx = drawCanvas.getContext('2d');
+  }
+
+  // ─── POINTER HANDLERS ───
+
+  function onPointerDown(e) {
+    if (!started) return;
+    // Ignore if info button or info panel
+    if (e.target.id === 'info-btn') return;
+    var infoPanel = document.getElementById('info-panel');
+    if (infoPanel.classList.contains('visible')) return;
+
+    // Double-click / double-tap detection
+    var now = Date.now();
+    if (now - lastClickTime < 350) {
+      clearAllOrbits();
+      lastClickTime = 0;
+      drawing = false;
+      if (drawCtx) drawCtx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+      return;
+    }
+    lastClickTime = now;
+
+    e.preventDefault();
+    drawing = true;
+    var pos = getPointerPos(e);
+    currentDrawPoints = [pos];
+    lastSamplePos = pos;
+    lastDrawPos = null;
+    lastDrawTime = 0;
+
+    if (drawCtx) {
+      drawCtx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+      drawCtx.beginPath();
+      drawCtx.moveTo(pos.x * dpr, pos.y * dpr);
+    }
+  }
+
+  function onPointerMove(e) {
+    if (!drawing) return;
+    e.preventDefault();
+    var pos = getPointerPos(e);
+
+    if (lastSamplePos) {
+      var dx = pos.x - lastSamplePos.x;
+      var dy = pos.y - lastSamplePos.y;
+      if (Math.sqrt(dx * dx + dy * dy) >= SAMPLE_INTERVAL) {
+        currentDrawPoints.push(pos);
+        lastSamplePos = pos;
+      }
+    }
+
+    // Draw-speed stutter: faster drawing = more intense stutter
+    var nowMs = performance.now();
+    if (lastDrawPos) {
+      var ddx = pos.x - lastDrawPos.x;
+      var ddy = pos.y - lastDrawPos.y;
+      var dist = Math.sqrt(ddx * ddx + ddy * ddy);
+      var dtDraw = (nowMs - lastDrawTime) / 1000;
+      if (dtDraw > 0.001) {
+        var speed = dist / dtDraw; // pixels/sec
+        var intensity = Math.min(1, speed / 1500);
+        if (intensity > 0.05) {
+          activateStutter(intensity, 0.06 + intensity * 0.08);
+        }
+      }
+    }
+    lastDrawPos = { x: pos.x, y: pos.y };
+    lastDrawTime = nowMs;
+
+    if (drawCtx) {
+      drawCtx.lineTo(pos.x * dpr, pos.y * dpr);
+      drawCtx.strokeStyle = 'rgba(255,255,255,0.5)';
+      drawCtx.lineWidth = 1.5 * dpr;
+      drawCtx.stroke();
+      drawCtx.beginPath();
+      drawCtx.moveTo(pos.x * dpr, pos.y * dpr);
+    }
+  }
+
+  function onPointerUp(e) {
+    if (!drawing) return;
+    drawing = false;
+
+    if (drawCtx) {
+      drawCtx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+    }
+
+    if (currentDrawPoints.length < 4) {
+      currentDrawPoints = [];
+      return;
+    }
+
+    // Enforce max orbits
+    if (orbits.length >= MAX_ORBITS) {
+      orbits[0].destroy();
+      orbits.shift();
+    }
+
+    var orbit = new Orbit(currentDrawPoints, orbits.length);
+    if (orbit.alive) {
+      orbits.push(orbit);
+      updateOrbitCount();
+    }
+    currentDrawPoints = [];
+  }
+
+  function clearAllOrbits() {
+    for (var i = 0; i < orbits.length; i++) {
+      orbits[i].destroy();
+    }
+    orbits = [];
+    updateOrbitCount();
+  }
+
+  function updateOrbitCount() {
+    var el = document.getElementById('orbit-count');
+    el.textContent = orbits.length > 0 ? ('orbits: ' + orbits.length) : '';
+  }
+
+  // ─── BACKGROUND GRID ───
+  var gridGroup = null;
+
+  function createGrid() {
+    var gridMat = new THREE.LineBasicMaterial({
+      color: 0x222222,
+      transparent: true,
+      opacity: 0.3
+    });
+    gridGroup = new THREE.Group();
+    var size = 6;
+    for (var i = -size; i <= size; i++) {
+      var pts1 = [new THREE.Vector3(i, -size, 0), new THREE.Vector3(i, size, 0)];
+      var pts2 = [new THREE.Vector3(-size, i, 0), new THREE.Vector3(size, i, 0)];
+      var l1 = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts1), gridMat);
+      var l2 = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts2), gridMat);
+      gridGroup.add(l1);
+      gridGroup.add(l2);
+    }
+    gridGroup.position.z = -3;
+    scene.add(gridGroup);
+  }
+
+  // ─── AUDIO INIT ───
+  function initAudio() {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    masterGain = audioCtx.createGain();
+    masterGain.gain.value = 0.55;
+
+    var compressor = audioCtx.createDynamicsCompressor();
+    compressor.threshold.value = -14;
+    compressor.knee.value = 8;
+    compressor.ratio.value = 10;
+    compressor.attack.value = 0.003;
+    compressor.release.value = 0.1;
+    masterGain.connect(compressor);
+    compressor.connect(audioCtx.destination);
+
+    // Stutter bank: 5 sine oscillators gated by a square-wave LFO
+    stutterMaster = audioCtx.createGain();
+    stutterMaster.gain.value = 0;
+    stutterMaster.connect(compressor);
+
+    stutterLFOGain = audioCtx.createGain();
+    stutterLFOGain.gain.value = 0;
+    stutterLFOGain.connect(stutterMaster.gain);
+
+    stutterLFO = audioCtx.createOscillator();
+    stutterLFO.type = 'square';
+    stutterLFO.frequency.value = 16;
+    stutterLFO.connect(stutterLFOGain);
+    stutterLFO.start();
+
+    for (var si = 0; si < stutterFreqs.length; si++) {
+      var sOsc = audioCtx.createOscillator();
+      sOsc.type = 'sine';
+      sOsc.frequency.value = stutterFreqs[si];
+      var sGain = audioCtx.createGain();
+      sGain.gain.value = 0;
+      sOsc.connect(sGain);
+      sGain.connect(stutterMaster);
+      sOsc.start();
+      stutterOscs.push(sOsc);
+      stutterGains.push(sGain);
+    }
+  }
+
+  // ─── START ───
+  function begin() {
+    if (started) return;
+    started = true;
+    document.getElementById('overlay').classList.add('hidden');
+
+    initAudio();
+    setupDrawCanvas();
+    createGrid();
+    animate(0);
+  }
+
+  // ─── EVENT LISTENERS ───
+
+  document.getElementById('overlay').addEventListener('pointerdown', function(e) {
+    e.preventDefault();
+    begin();
+  });
+
+  document.getElementById('info-btn').addEventListener('pointerdown', function(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    document.getElementById('info-panel').classList.toggle('visible');
+  });
+
+  document.getElementById('info-panel').addEventListener('pointerdown', function(e) {
+    e.preventDefault();
+    this.classList.remove('visible');
+  });
+
+  document.addEventListener('pointerdown', onPointerDown, { passive: false });
+  document.addEventListener('pointermove', onPointerMove, { passive: false });
+  document.addEventListener('pointerup', onPointerUp, { passive: false });
+  document.addEventListener('pointercancel', onPointerUp, { passive: false });
+
+  // Prevent context menu on long-press
+  document.addEventListener('contextmenu', function(e) { e.preventDefault(); });
+
+  // Resize
+  window.addEventListener('resize', function() {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    if (drawCanvas) {
+      dpr = Math.min(window.devicePixelRatio, 2);
+      drawCanvas.width = window.innerWidth * dpr;
+      drawCanvas.height = window.innerHeight * dpr;
+    }
+  });
+
+  // ─── ANIMATION LOOP ───
+  var lastTime = 0;
+
+  function animate(timestamp) {
+    requestAnimationFrame(animate);
+    if (!timestamp) timestamp = 0;
+    var dt = Math.min((timestamp - lastTime) / 1000, 0.05);
+    lastTime = timestamp;
+    time += dt;
+
+    // Gentle camera drift
+    camera.position.x = Math.sin(time * 0.07) * 0.3;
+    camera.position.y = Math.cos(time * 0.05) * 0.2;
+    camera.lookAt(0, 0, 0);
+
+    // Update all orbits
+    for (var i = orbits.length - 1; i >= 0; i--) {
+      if (orbits[i].alive) {
+        orbits[i].update(dt);
+      }
+    }
+
+    renderer.render(scene, camera);
+  }
+
+})();
+</script>
+</body>
+</html>
